@@ -1,0 +1,123 @@
+name: Build
+
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  native:
+    name: ${{ matrix.rid }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-latest, rid: win-x64,      lib: libvgmstream.dll }
+          - { runner: ubuntu-22.04,   rid: linux-x64,    lib: libvgmstream.so }
+          - { runner: ubuntu-22.04,   rid: linux-arm64,  lib: libvgmstream.so, cross: aarch64 }
+          - { runner: macos-13,       rid: osx-x64,      lib: libvgmstream.dylib }
+          - { runner: macos-latest,   rid: osx-arm64,    lib: libvgmstream.dylib }
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # windows
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cmake -S vgmstream -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_SHARED_LIBS=ON "-DCMAKE_C_FLAGS=-DLIBVGMSTREAM_EXPORT"
+
+          # upstream ext_libs generates x86 import libs, rebuild them as x64
+          Get-ChildItem build/ext_libs -Filter "*.lib" | ForEach-Object {
+            $def = "vgmstream/ext_libs/$($_.BaseName).def"
+            if (Test-Path $def) { lib /def:$def /machine:x64 /out:$($_.FullName) 2>&1 | Out-Null }
+          }
+
+          cmake --build build --config Release --target libvgmstream_shared
+
+      - name: Collect (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $out = "runtimes/${{ matrix.rid }}/native"
+          New-Item -ItemType Directory -Path $out -Force | Out-Null
+          Copy-Item build/src/Release/${{ matrix.lib }} $out
+          Copy-Item vgmstream/ext_libs/dll-x64/*.dll $out
+
+      # linux
+      - name: Install deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y yasm libopus-dev
+          ${{ matrix.cross == 'aarch64' && 'sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu' || '' }}
+
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          flags="-DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DCMAKE_C_FLAGS=-DLIBVGMSTREAM_EXPORT"
+          if [ "${{ matrix.cross }}" = "aarch64" ]; then
+            flags="$flags -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64"
+            flags="$flags -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++"
+          fi
+          cmake -S vgmstream -B build $flags
+          cmake --build build --config Release --target libvgmstream_shared
+
+      - name: Collect (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p runtimes/${{ matrix.rid }}/native
+          cp build/src/${{ matrix.lib }} runtimes/${{ matrix.rid }}/native/
+
+      # macos
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cmake -S vgmstream -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DCMAKE_C_FLAGS="-DLIBVGMSTREAM_EXPORT"
+          cmake --build build --config Release --target libvgmstream_shared
+
+      - name: Collect (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p runtimes/${{ matrix.rid }}/native
+          cp build/src/${{ matrix.lib }} runtimes/${{ matrix.rid }}/native/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.rid }}
+          path: runtimes/${{ matrix.rid }}/native/
+
+  package:
+    name: Package
+    needs: native
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: artifacts
+
+      - name: Arrange runtimes
+        run: |
+          for dir in artifacts/native-*; do
+            rid="${dir#artifacts/native-}"
+            mkdir -p "VgmStream.NET/runtimes/$rid/native"
+            cp "$dir"/* "VgmStream.NET/runtimes/$rid/native/"
+          done
+
+      - run: dotnet build VgmStream.NET.sln -c Release
+      - run: dotnet test VgmStream.NET.sln -c Release --no-build
+      - run: dotnet pack VgmStream.NET/VgmStream.NET.csproj -c Release --no-build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nuget
+          path: |
+            VgmStream.NET/bin/Release/*.nupkg
+            VgmStream.NET/bin/Release/*.snupkg

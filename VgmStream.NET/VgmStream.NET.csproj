@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net9.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+        <RootNamespace>VgmStream.NET</RootNamespace>
+
+        <!-- NuGet package metadata -->
+        <PackageId>VgmStream.NET</PackageId>
+        <Version>0.1.0</Version>
+        <Authors>PSYLOCKE-GG</Authors>
+        <Description>C# P/Invoke wrapper for vgmstream — decode hundreds of video game audio formats</Description>
+        <PackageLicenseExpression>ISC</PackageLicenseExpression>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <PackageTags>vgmstream;audio;game;decoder;pcm;wav;adx;hca;wem;brstm</PackageTags>
+        <RepositoryUrl>https://github.com/PSYLOCKE-GG/VgmStream.NET</RepositoryUrl>
+        <RepositoryType>git</RepositoryType>
+        <PublishRepositoryUrl>true</PublishRepositoryUrl>
+        <EmbedUntrackedSources>true</EmbedUntrackedSources>
+        <IncludeSymbols>true</IncludeSymbols>
+        <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+        <IncludeContentInPack>true</IncludeContentInPack>
+    </PropertyGroup>
+
+    <PropertyGroup Condition="'$(GITHUB_ACTIONS)' == 'true'">
+        <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+    </PropertyGroup>
+
+    <!-- Pack the README into the NuGet package root -->
+    <ItemGroup>
+        <None Include="..\README.md" Pack="true" PackagePath="" />
+    </ItemGroup>
+
+    <!-- Include native binaries in build output (placed by CI or manually) -->
+    <ItemGroup>
+        <None Include="runtimes\**\*" CopyToOutputDirectory="PreserveNewest" Link="runtimes\%(RecursiveDir)%(Filename)%(Extension)" />
+    </ItemGroup>
+
+    <!-- Include native binaries in NuGet package under runtimes/ -->
+    <ItemGroup>
+        <Content Include="runtimes\win-x64\native\**" PackagePath="runtimes/win-x64/native" Pack="true" />
+        <Content Include="runtimes\linux-x64\native\**" PackagePath="runtimes/linux-x64/native" Pack="true" />
+        <Content Include="runtimes\linux-arm64\native\**" PackagePath="runtimes/linux-arm64/native" Pack="true" />
+        <Content Include="runtimes\osx-x64\native\**" PackagePath="runtimes/osx-x64/native" Pack="true" />
+        <Content Include="runtimes\osx-arm64\native\**" PackagePath="runtimes/osx-arm64/native" Pack="true" />
+    </ItemGroup>
+
+</Project>
