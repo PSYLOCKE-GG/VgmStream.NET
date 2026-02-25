@@ -6,10 +6,6 @@ env:
   CMAKE_COMMON: >-
     -DBUILD_SHARED_LIBS=ON
     -DBUILD_CLI=OFF
-    -DBUILD_FB2K=OFF
-    -DBUILD_WINAMP=OFF
-    -DBUILD_XMPLAY=OFF
-    -DBUILD_AUDACIOUS=OFF
     -DBUILD_V123=OFF
 
 jobs:
@@ -36,12 +32,16 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          cmake -S vgmstream -B build -G "Visual Studio 17 2022" -A x64 ${{ env.CMAKE_COMMON }} "-DCMAKE_C_FLAGS=-DLIBVGMSTREAM_EXPORT"
+          cmake -S vgmstream -B build -G "Visual Studio 17 2022" -A x64 `
+            ${{ env.CMAKE_COMMON }} -DBUILD_FB2K=OFF -DBUILD_WINAMP=OFF -DBUILD_XMPLAY=OFF `
+            "-DCMAKE_C_FLAGS=-DLIBVGMSTREAM_EXPORT"
 
-          # upstream ext_libs generates x86 import libs, rebuild as x64
-          Get-ChildItem build/ext_libs -Filter "*.lib" | ForEach-Object {
-            $def = "vgmstream/ext_libs/$($_.BaseName).def"
-            if (Test-Path $def) { lib /def:$def /machine:x64 /out:$($_.FullName) 2>&1 | Out-Null }
+          # upstream ext_libs cmake hardcodes /machine:x86, pre-generate x64 import libs
+          # so the build step finds them already up-to-date and skips regeneration
+          New-Item -ItemType Directory -Path build/ext_libs -Force | Out-Null
+          Get-ChildItem vgmstream/ext_libs -Filter "*.def" | ForEach-Object {
+            $out = "build/ext_libs/$($_.BaseName).lib"
+            lib /def:$($_.FullName) /machine:x64 /out:$out 2>&1 | Out-Null
           }
 
           cmake --build build --config Release --target libvgmstream_shared
@@ -66,7 +66,8 @@ jobs:
       - name: Build (Linux)
         if: runner.os == 'Linux'
         run: |
-          flags="-DCMAKE_BUILD_TYPE=Release ${{ env.CMAKE_COMMON }} -DCMAKE_C_FLAGS=-DLIBVGMSTREAM_EXPORT"
+          flags="-DCMAKE_BUILD_TYPE=Release ${{ env.CMAKE_COMMON }} -DBUILD_AUDACIOUS=OFF"
+          flags="$flags -DCMAKE_SKIP_INSTALL_RULES=ON -DCMAKE_C_FLAGS=-DLIBVGMSTREAM_EXPORT"
           if [ "${{ matrix.cross }}" = "aarch64" ]; then
             flags="$flags -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64"
             flags="$flags -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++"
@@ -84,7 +85,8 @@ jobs:
       - name: Build (macOS)
         if: runner.os == 'macOS'
         run: |
-          cmake -S vgmstream -B build -DCMAKE_BUILD_TYPE=Release ${{ env.CMAKE_COMMON }} -DCMAKE_C_FLAGS="-DLIBVGMSTREAM_EXPORT"
+          cmake -S vgmstream -B build -DCMAKE_BUILD_TYPE=Release ${{ env.CMAKE_COMMON }} \
+            -DCMAKE_SKIP_INSTALL_RULES=ON -DCMAKE_C_FLAGS="-DLIBVGMSTREAM_EXPORT"
           cmake --build build --config Release --target libvgmstream_shared
 
       - name: Collect (macOS)
