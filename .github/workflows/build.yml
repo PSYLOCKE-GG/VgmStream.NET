@@ -2,6 +2,16 @@ name: Build
 
 on: [push, pull_request, workflow_dispatch]
 
+env:
+  CMAKE_COMMON: >-
+    -DBUILD_SHARED_LIBS=ON
+    -DBUILD_CLI=OFF
+    -DBUILD_FB2K=OFF
+    -DBUILD_WINAMP=OFF
+    -DBUILD_XMPLAY=OFF
+    -DBUILD_AUDACIOUS=OFF
+    -DBUILD_V123=OFF
+
 jobs:
   native:
     name: ${{ matrix.rid }}
@@ -10,11 +20,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { runner: windows-latest, rid: win-x64,      lib: libvgmstream.dll }
-          - { runner: ubuntu-22.04,   rid: linux-x64,    lib: libvgmstream.so }
-          - { runner: ubuntu-22.04,   rid: linux-arm64,  lib: libvgmstream.so, cross: aarch64 }
-          - { runner: macos-13,       rid: osx-x64,      lib: libvgmstream.dylib }
-          - { runner: macos-latest,   rid: osx-arm64,    lib: libvgmstream.dylib }
+          - { runner: windows-latest,  rid: win-x64,     lib: libvgmstream.dll }
+          - { runner: ubuntu-22.04,    rid: linux-x64,   lib: libvgmstream.so }
+          - { runner: ubuntu-22.04,    rid: linux-arm64,  lib: libvgmstream.so, cross: aarch64 }
+          - { runner: macos-15-intel,  rid: osx-x64,     lib: libvgmstream.dylib }
+          - { runner: macos-15,        rid: osx-arm64,   lib: libvgmstream.dylib }
 
     steps:
       - uses: actions/checkout@v4
@@ -26,9 +36,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          cmake -S vgmstream -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_SHARED_LIBS=ON "-DCMAKE_C_FLAGS=-DLIBVGMSTREAM_EXPORT"
+          cmake -S vgmstream -B build -G "Visual Studio 17 2022" -A x64 ${{ env.CMAKE_COMMON }} "-DCMAKE_C_FLAGS=-DLIBVGMSTREAM_EXPORT"
 
-          # upstream ext_libs generates x86 import libs, rebuild them as x64
+          # upstream ext_libs generates x86 import libs, rebuild as x64
           Get-ChildItem build/ext_libs -Filter "*.lib" | ForEach-Object {
             $def = "vgmstream/ext_libs/$($_.BaseName).def"
             if (Test-Path $def) { lib /def:$def /machine:x64 /out:$($_.FullName) 2>&1 | Out-Null }
@@ -56,7 +66,7 @@ jobs:
       - name: Build (Linux)
         if: runner.os == 'Linux'
         run: |
-          flags="-DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DCMAKE_C_FLAGS=-DLIBVGMSTREAM_EXPORT"
+          flags="-DCMAKE_BUILD_TYPE=Release ${{ env.CMAKE_COMMON }} -DCMAKE_C_FLAGS=-DLIBVGMSTREAM_EXPORT"
           if [ "${{ matrix.cross }}" = "aarch64" ]; then
             flags="$flags -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64"
             flags="$flags -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++"
@@ -74,7 +84,7 @@ jobs:
       - name: Build (macOS)
         if: runner.os == 'macOS'
         run: |
-          cmake -S vgmstream -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DCMAKE_C_FLAGS="-DLIBVGMSTREAM_EXPORT"
+          cmake -S vgmstream -B build -DCMAKE_BUILD_TYPE=Release ${{ env.CMAKE_COMMON }} -DCMAKE_C_FLAGS="-DLIBVGMSTREAM_EXPORT"
           cmake --build build --config Release --target libvgmstream_shared
 
       - name: Collect (macOS)
