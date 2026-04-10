@@ -67,6 +67,12 @@ jobs:
           ) | ForEach-Object { Copy-Item "vgmstream/ext_libs/dll-x64/$_" $out }
 
       # ── Linux ──
+      - name: Install deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm
+
       - name: Build (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -86,13 +92,21 @@ jobs:
           cp build/src/${{ matrix.lib }} runtimes/${{ matrix.rid }}/native/
 
       # ── macOS ──
+      - name: Install deps (macOS)
+        if: runner.os == 'macOS'
+        run: brew install libvorbis libogg ffmpeg
+
       - name: Build (macOS)
         if: runner.os == 'macOS'
         run: |
+          BREW_PREFIX="$(brew --prefix)"
+          export PKG_CONFIG_PATH="$BREW_PREFIX/lib/pkgconfig:$(brew --prefix ffmpeg)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
           cmake -S vgmstream -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=ON \
             -DCMAKE_SKIP_INSTALL_RULES=ON \
+            -DCMAKE_PREFIX_PATH="$BREW_PREFIX" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-L$BREW_PREFIX/lib -L$(brew --prefix ffmpeg)/lib" \
             -DBUILD_CLI=OFF -DBUILD_V123=OFF -DBUILD_AUDACIOUS=OFF \
             -DUSE_MPEG=OFF -DUSE_G719=OFF -DUSE_G7221=OFF -DUSE_CELT=OFF \
             -DUSE_ATRAC9=OFF -DUSE_SPEEX=OFF
@@ -101,8 +115,40 @@ jobs:
       - name: Collect (macOS)
         if: runner.os == 'macOS'
         run: |
-          mkdir -p runtimes/${{ matrix.rid }}/native
-          cp build/src/${{ matrix.lib }} runtimes/${{ matrix.rid }}/native/
+          BREW_PREFIX="$(brew --prefix)"
+          out="runtimes/${{ matrix.rid }}/native"
+          mkdir -p "$out"
+          cp build/src/${{ matrix.lib }} "$out/"
+
+          # Bundle brew dylibs so consumers don't need anything installed.
+          # Resolve symlinks to get the actual versioned files.
+          for lib in vorbis vorbisfile ogg; do
+            real=$(realpath "$BREW_PREFIX/lib/lib${lib}.dylib")
+            cp "$real" "$out/lib${lib}.dylib"
+          done
+          ffprefix="$(brew --prefix ffmpeg)"
+          for lib in avcodec avformat avutil swresample; do
+            real=$(realpath "$ffprefix/lib/lib${lib}.dylib")
+            cp "$real" "$out/lib${lib}.dylib"
+          done
+
+          # Rewrite load paths to use @loader_path (same directory)
+          cd "$out"
+          for f in *.dylib; do
+            # Fix the library's own install name
+            install_name_tool -id "@loader_path/$f" "$f" 2>/dev/null || true
+            # Rewrite all brew references to @loader_path
+            otool -L "$f" | awk '{print $1}' | while read dep; do
+              case "$dep" in
+                /opt/homebrew/*|/usr/local/*)
+                  name=$(basename "$dep")
+                  # Strip version suffixes (e.g. libavcodec.61.dylib -> libavcodec.dylib)
+                  base="${name%%.[0-9]*}.dylib"
+                  install_name_tool -change "$dep" "@loader_path/$base" "$f" 2>/dev/null || true
+                  ;;
+              esac
+            done
+          done
 
       - uses: actions/upload-artifact@v4
         with:
