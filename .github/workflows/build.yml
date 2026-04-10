@@ -10,18 +10,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { runner: windows-latest, rid: win-x64,      lib: libvgmstream.dll }
-          - { runner: ubuntu-22.04,   rid: linux-x64,    lib: libvgmstream.so }
-          - { runner: ubuntu-22.04,   rid: linux-arm64,  lib: libvgmstream.so, cross: aarch64 }
-          - { runner: macos-15-intel, rid: osx-x64,      lib: libvgmstream.dylib }
-          - { runner: macos-15,       rid: osx-arm64,    lib: libvgmstream.dylib }
+          - { runner: windows-latest, rid: win-x64,    lib: libvgmstream.dll }
+          - { runner: ubuntu-22.04,   rid: linux-x64,  lib: libvgmstream.so }
+          - { runner: macos-15,       rid: osx-arm64,  lib: libvgmstream.dylib }
 
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      # windows
+      # ── Windows ──
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
         with:
@@ -34,14 +32,18 @@ jobs:
           cmake -S vgmstream -B build -G "Visual Studio 17 2022" -A x64 `
             -DBUILD_SHARED_LIBS=ON `
             -DCMAKE_WINDOWS_EXPORT_ALL_SYMBOLS=ON `
-            -DBUILD_CLI=OFF -DBUILD_FB2K=OFF -DBUILD_WINAMP=OFF -DBUILD_XMPLAY=OFF
+            -DBUILD_CLI=OFF -DBUILD_FB2K=OFF -DBUILD_WINAMP=OFF -DBUILD_XMPLAY=OFF `
+            -DUSE_MPEG=OFF -DUSE_G719=OFF -DUSE_G7221=OFF -DUSE_CELT=OFF `
+            -DUSE_ATRAC9=OFF -DUSE_SPEEX=OFF
 
-          # ext_libs cmake hardcodes /machine:x86 — regenerate as x64
+          # Pre-generate x64 import libs with names cmake expects
+          # (ext_libs/CMakeLists.txt hardcodes /machine:x86 — we override)
           New-Item -ItemType Directory -Path build/ext_libs -Force | Out-Null
-          Get-ChildItem vgmstream/ext_libs -Filter "*.def" | ForEach-Object {
-            $out = "build/ext_libs/$($_.BaseName).lib"
-            lib /def:$($_.FullName) /machine:x64 /out:$out 2>&1 | Out-Null
-          }
+          lib /def:vgmstream/ext_libs/libvorbis.def /machine:x64 /out:build/ext_libs/libvorbis.lib
+          lib /def:vgmstream/ext_libs/avcodec-vgmstream-59.def /machine:x64 /out:build/ext_libs/avcodec.lib
+          lib /def:vgmstream/ext_libs/avformat-vgmstream-59.def /machine:x64 /out:build/ext_libs/avformat.lib
+          lib /def:vgmstream/ext_libs/avutil-vgmstream-57.def /machine:x64 /out:build/ext_libs/avutil.lib
+          lib /def:vgmstream/ext_libs/swresample-vgmstream-4.def /machine:x64 /out:build/ext_libs/swresample.lib
 
           cmake --build build --config Release --target libvgmstream_shared
 
@@ -52,28 +54,33 @@ jobs:
           $out = "runtimes/${{ matrix.rid }}/native"
           New-Item -ItemType Directory -Path $out -Force | Out-Null
           Copy-Item build/src/Release/${{ matrix.lib }} $out
-          Copy-Item vgmstream/ext_libs/dll-x64/*.dll $out
 
-      # linux
+          @(
+            "libvorbis.dll",
+            "avcodec-vgmstream-59.dll",
+            "avformat-vgmstream-59.dll",
+            "avutil-vgmstream-57.dll",
+            "swresample-vgmstream-4.dll"
+          ) | ForEach-Object { Copy-Item "vgmstream/ext_libs/dll-x64/$_" $out }
+
+      # ── Linux ──
       - name: Install deps (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y yasm libopus-dev
-          ${{ matrix.cross == 'aarch64' && 'sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu' || '' }}
+          sudo apt-get install -y libvorbis-dev libogg-dev \
+            libavcodec-dev libavformat-dev libavutil-dev libswresample-dev
 
       - name: Build (Linux)
         if: runner.os == 'Linux'
         run: |
-          flags="-DCMAKE_BUILD_TYPE=Release"
-          flags="$flags -DBUILD_SHARED_LIBS=ON -DCMAKE_SKIP_INSTALL_RULES=ON"
-          flags="$flags -DBUILD_CLI=OFF -DBUILD_V123=OFF -DBUILD_AUDACIOUS=OFF"
-          if [ "${{ matrix.cross }}" = "aarch64" ]; then
-            flags="$flags -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64"
-            flags="$flags -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++"
-            flags="$flags -DUSE_CELT=OFF"
-          fi
-          cmake -S vgmstream -B build $flags
+          cmake -S vgmstream -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON \
+            -DCMAKE_SKIP_INSTALL_RULES=ON \
+            -DBUILD_CLI=OFF -DBUILD_V123=OFF -DBUILD_AUDACIOUS=OFF \
+            -DUSE_MPEG=OFF -DUSE_G719=OFF -DUSE_G7221=OFF -DUSE_CELT=OFF \
+            -DUSE_ATRAC9=OFF -DUSE_SPEEX=OFF
           cmake --build build --config Release --target libvgmstream_shared
 
       - name: Collect (Linux)
@@ -82,13 +89,22 @@ jobs:
           mkdir -p runtimes/${{ matrix.rid }}/native
           cp build/src/${{ matrix.lib }} runtimes/${{ matrix.rid }}/native/
 
-      # macos
+      # ── macOS ──
+      - name: Install deps (macOS)
+        if: runner.os == 'macOS'
+        run: brew install libvorbis libogg ffmpeg
+
       - name: Build (macOS)
         if: runner.os == 'macOS'
         run: |
-          cmake -S vgmstream -B build -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_SHARED_LIBS=ON -DCMAKE_SKIP_INSTALL_RULES=ON \
-            -DBUILD_CLI=OFF -DBUILD_V123=OFF -DBUILD_AUDACIOUS=OFF
+          export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig:$(brew --prefix ffmpeg)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          cmake -S vgmstream -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON \
+            -DCMAKE_SKIP_INSTALL_RULES=ON \
+            -DBUILD_CLI=OFF -DBUILD_V123=OFF -DBUILD_AUDACIOUS=OFF \
+            -DUSE_MPEG=OFF -DUSE_G719=OFF -DUSE_G7221=OFF -DUSE_CELT=OFF \
+            -DUSE_ATRAC9=OFF -DUSE_SPEEX=OFF
           cmake --build build --config Release --target libvgmstream_shared
 
       - name: Collect (macOS)
