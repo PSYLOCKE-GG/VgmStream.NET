@@ -76,6 +76,10 @@ jobs:
       - name: Build (Linux)
         if: runner.os == 'Linux'
         run: |
+          # FFmpeg is built from source as a static lib, but it needs -fPIC
+          # to be linked into a shared object. Set CFLAGS so FFmpeg's
+          # ./configure picks it up (vgmstream's cmake can't be modified).
+          export CFLAGS="-fPIC"
           cmake -S vgmstream -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=ON \
