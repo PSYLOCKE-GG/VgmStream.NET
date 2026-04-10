@@ -3,7 +3,7 @@ using Xunit;
 
 namespace VgmStream.NET.Tests;
 
-public class VgmStreamConverterTests
+public class VgmStreamTests
 {
     [Fact]
     public void SampleFormat_EnumValues_MatchNative()

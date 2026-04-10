@@ -19,15 +19,15 @@ if (!VgmStreamClass.IsAvailable)
 Console.WriteLine($"libvgmstream version: 0x{VgmStreamClass.GetVersion():X8}");
 Console.WriteLine();
 
-// Check extension validity
 Console.WriteLine($"Input:    {inputPath}");
 Console.WriteLine($"Valid:    {VgmStreamClass.IsValid(inputPath)}");
 Console.WriteLine();
 
-// Open and display format info
 try
 {
-    using var vgm = new VgmStreamClass(inputPath, config: new VgmStreamConfig { IgnoreLoop = true });
+    using var inputStream = File.OpenRead(inputPath);
+    using var vgm = new VgmStreamClass(inputStream, Path.GetFileName(inputPath),
+        config: new VgmStreamConfig { IgnoreLoop = true });
 
     Console.WriteLine($"Channels:      {vgm.Channels}");
     Console.WriteLine($"Sample rate:   {vgm.SampleRate} Hz");
@@ -44,24 +44,29 @@ try
     Console.WriteLine($"Bitrate:       {vgm.StreamBitrate} bps");
     Console.WriteLine();
 
-    // Render a few batches to verify decoding works
-    int batchCount = 0;
+    using var reader = new VgmStreamReader(vgm);
+    byte[] buf = new byte[64 * 1024];
     long totalBytes = 0;
-    while (!vgm.Done && batchCount < 5)
+    int batches = 0;
+    while (batches < 5)
     {
-        var samples = vgm.Render();
-        totalBytes += samples.Length;
-        batchCount++;
+        int read = reader.Read(buf);
+        if (read == 0) break;
+        totalBytes += read;
+        batches++;
     }
-    Console.WriteLine($"Test decode:   {batchCount} batches, {totalBytes} bytes");
+    Console.WriteLine($"Test decode:   {batches} batches, {totalBytes} bytes via VgmStreamReader");
     Console.WriteLine();
 
-    // Convert to WAV if output path given
     if (outputPath != null)
     {
         Console.WriteLine("Converting to WAV...");
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        VgmStreamConverter.ConvertToWav(inputPath, outputPath);
+
+        vgm.Reset();
+        using var outputStream = new BufferedStream(File.Create(outputPath), 256 * 1024);
+        reader.WriteWavTo(outputStream);
+
         sw.Stop();
         Console.WriteLine($"Done in {sw.Elapsed.TotalSeconds:F1}s -> {outputPath}");
     }

@@ -9,6 +9,7 @@ namespace VgmStream.NET;
 public sealed unsafe class VgmStream : IDisposable
 {
     private nint _lib;
+    private ManagedStreamfile? _managedSf;
     private bool _disposed;
 
     /// <summary>
@@ -62,6 +63,53 @@ public sealed unsafe class VgmStream : IDisposable
         }
         catch
         {
+            VgmStreamNative.LibvgmstreamFree(_lib);
+            _lib = 0;
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Opens a game audio stream for decoding from any seekable .NET Stream.
+    /// </summary>
+    /// <param name="input">Seekable, readable stream containing the audio data.</param>
+    /// <param name="name">
+    /// Filename hint (e.g. "music.adx"). The extension is used by vgmstream
+    /// to identify the format — the name does not need to be a real path.
+    /// </param>
+    /// <param name="subsong">Subsong index (0 = default/first, 1..N = specific subsong).</param>
+    /// <param name="config">Optional playback configuration.</param>
+    public VgmStream(Stream input, string name, int subsong = 0, VgmStreamConfig? config = null)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        ArgumentNullException.ThrowIfNull(name);
+
+        VgmStreamNative.EnsureLoaded();
+
+        _lib = VgmStreamNative.LibvgmstreamInit();
+        if (_lib == 0)
+            throw new InvalidOperationException("Failed to initialize vgmstream context.");
+
+        try
+        {
+            if (config != null)
+            {
+                var nativeCfg = ConfigToNative(config);
+                VgmStreamNative.LibvgmstreamSetup(_lib, &nativeCfg);
+            }
+
+            _managedSf = new ManagedStreamfile(input, name);
+
+            int result = VgmStreamNative.LibvgmstreamOpenStream(_lib, _managedSf.NativeHandle, subsong);
+            if (result < 0)
+                throw new InvalidOperationException($"Failed to open stream: error {result}. File may not be a supported format.");
+
+            ReadFormatInfo();
+        }
+        catch
+        {
+            _managedSf?.Dispose();
+            _managedSf = null;
             VgmStreamNative.LibvgmstreamFree(_lib);
             _lib = 0;
             throw;
@@ -190,6 +238,16 @@ public sealed unsafe class VgmStream : IDisposable
     }
 
     /// <summary>
+    /// Opens a decoded PCM stream from any seekable .NET Stream.
+    /// The returned stream owns the underlying VgmStream and disposes it on close.
+    /// </summary>
+    public static VgmStreamReader OpenRead(Stream input, string name, int subsong = 0, VgmStreamConfig? config = null)
+    {
+        var vgm = new VgmStream(input, name, subsong, config);
+        return new VgmStreamReader(vgm, ownsVgm: true);
+    }
+
+    /// <summary>
     /// Whether the native vgmstream library is available.
     /// </summary>
     public static bool IsAvailable => VgmStreamNative.IsAvailable;
@@ -252,6 +310,8 @@ public sealed unsafe class VgmStream : IDisposable
             VgmStreamNative.LibvgmstreamFree(_lib);
             _lib = 0;
         }
+        _managedSf?.Dispose();
+        _managedSf = null;
     }
 
     private void ReadFormatInfo()

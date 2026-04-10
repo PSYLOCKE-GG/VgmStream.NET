@@ -39,6 +39,7 @@ public static unsafe class VgmStreamNative
     private static nint _pTagsNextTag;
     private static nint _pTagsFree;
     private static nint _pOpenFromStdio;
+    private static nint _pOpenBuffered;
     private static nint _pStreamfileClose;
 
     /// <summary>
@@ -131,6 +132,7 @@ public static unsafe class VgmStreamNative
             && NativeLibrary.TryGetExport(_lib, "libvgmstream_format_describe", out _pFormatDescribe)
             && NativeLibrary.TryGetExport(_lib, "libvgmstream_is_virtual_filename", out _pIsVirtualFilename)
             && NativeLibrary.TryGetExport(_lib, "libstreamfile_open_from_stdio", out _pOpenFromStdio)
+            && NativeLibrary.TryGetExport(_lib, "libstreamfile_open_buffered", out _pOpenBuffered)
             && NativeLibrary.TryGetExport(_lib, "libstreamfile_close", out _pStreamfileClose);
 
         // Optional symbols — resolve if available but don't fail the load
@@ -409,7 +411,17 @@ public static unsafe class VgmStreamNative
     }
 
     /// <summary>
-    /// Closes a libstreamfile_t. Exported as a proper API function.
+    /// Wraps a libstreamfile_t with vgmstream's internal read cache.
+    /// Recommended for custom streamfiles since vgmstream seeks heavily.
+    /// </summary>
+    public static nint LibstreamfileOpenBuffered(nint extLibsf)
+    {
+        EnsureLoaded();
+        return ((delegate* unmanaged[Cdecl]<nint, nint>)_pOpenBuffered)(extLibsf);
+    }
+
+    /// <summary>
+    /// Closes a libstreamfile_t.
     /// </summary>
     public static void LibstreamfileClose(nint libsf)
     {

@@ -4,42 +4,25 @@ using System.Buffers.Binary;
 namespace VgmStream.NET;
 
 /// <summary>
-/// Static convenience methods for converting game audio to WAV format.
-/// Writes a standard RIFF/WAV header then streams decoded PCM samples.
+/// Extension methods for writing VgmStreamReader output to common formats.
 /// </summary>
-public static class VgmStreamConverter
+public static class VgmStreamReaderExtensions
 {
     private const uint MaxWavDataSize = uint.MaxValue - 36;
 
     /// <summary>
-    /// Converts a game audio file to WAV and writes to the specified output path.
-    /// Creates or overwrites the file at <paramref name="outputPath"/>.
+    /// Writes the decoded audio as a RIFF/WAV stream to <paramref name="output"/>.
     /// </summary>
-    public static void ConvertToWav(string inputPath, string outputPath, VgmStreamConfig? config = null)
+    public static void WriteWavTo(this VgmStreamReader reader, Stream output)
     {
-        using var output = File.Create(outputPath);
-        ConvertToWav(inputPath, output, config);
-    }
+        ArgumentNullException.ThrowIfNull(reader);
+        ArgumentNullException.ThrowIfNull(output);
 
-    /// <summary>
-    /// Converts a game audio file to WAV and writes to the specified stream.
-    /// When <paramref name="config"/> is null, defaults to ignoring loops so the
-    /// stream has a finite length suitable for WAV output.
-    /// </summary>
-    public static void ConvertToWav(string inputPath, Stream output, VgmStreamConfig? config = null)
-    {
-        config ??= new VgmStreamConfig { IgnoreLoop = true };
-
-        using var vgm = new VgmStream(inputPath, config: config);
-
-        int channels = vgm.Channels;
-        int sampleRate = vgm.SampleRate;
-        int sampleSize = vgm.SampleSize;
-        int bitsPerSample = sampleSize * 8;
-        ushort formatTag = vgm.SampleFormat == SampleFormat.Float ? (ushort)3 : (ushort)1;
+        var vgm = reader.VgmStream;
+        var (formatTag, channels, sampleRate, bitsPerSample) = GetWavParams(vgm);
 
         long headerStart = output.Position;
-        WriteWavHeader(output, formatTag, (ushort)channels, (uint)sampleRate, (ushort)bitsPerSample, 0);
+        WriteWavHeader(output, formatTag, channels, sampleRate, bitsPerSample, 0);
 
         long totalDataBytes = 0;
         while (!vgm.Done)
@@ -56,30 +39,25 @@ public static class VgmStreamConverter
         {
             long endPos = output.Position;
             output.Position = headerStart;
-            WriteWavHeader(output, formatTag, (ushort)channels, (uint)sampleRate, (ushort)bitsPerSample, ClampDataSize(totalDataBytes));
+            WriteWavHeader(output, formatTag, channels, sampleRate, bitsPerSample, ClampDataSize(totalDataBytes));
             output.Position = endPos;
         }
     }
 
     /// <summary>
-    /// Asynchronously converts a game audio file to WAV and writes to the specified stream.
-    /// The decoding itself is CPU-bound and runs synchronously; only the stream writes are async.
-    /// When <paramref name="config"/> is null, defaults to ignoring loops.
+    /// Asynchronously writes the decoded audio as a RIFF/WAV stream to <paramref name="output"/>.
+    /// Decoding is CPU-bound; only the stream writes are async.
     /// </summary>
-    public static async Task ConvertToWavAsync(string inputPath, Stream output, VgmStreamConfig? config = null, CancellationToken cancellationToken = default)
+    public static async Task WriteWavToAsync(this VgmStreamReader reader, Stream output, CancellationToken cancellationToken = default)
     {
-        config ??= new VgmStreamConfig { IgnoreLoop = true };
+        ArgumentNullException.ThrowIfNull(reader);
+        ArgumentNullException.ThrowIfNull(output);
 
-        using var vgm = new VgmStream(inputPath, config: config);
-
-        int channels = vgm.Channels;
-        int sampleRate = vgm.SampleRate;
-        int sampleSize = vgm.SampleSize;
-        int bitsPerSample = sampleSize * 8;
-        ushort formatTag = vgm.SampleFormat == SampleFormat.Float ? (ushort)3 : (ushort)1;
+        var vgm = reader.VgmStream;
+        var (formatTag, channels, sampleRate, bitsPerSample) = GetWavParams(vgm);
 
         long headerStart = output.Position;
-        WriteWavHeader(output, formatTag, (ushort)channels, (uint)sampleRate, (ushort)bitsPerSample, 0);
+        WriteWavHeader(output, formatTag, channels, sampleRate, bitsPerSample, 0);
 
         long totalDataBytes = 0;
         while (!vgm.Done)
@@ -108,9 +86,15 @@ public static class VgmStreamConverter
         {
             long endPos = output.Position;
             output.Position = headerStart;
-            WriteWavHeader(output, formatTag, (ushort)channels, (uint)sampleRate, (ushort)bitsPerSample, ClampDataSize(totalDataBytes));
+            WriteWavHeader(output, formatTag, channels, sampleRate, bitsPerSample, ClampDataSize(totalDataBytes));
             output.Position = endPos;
         }
+    }
+
+    private static (ushort formatTag, ushort channels, uint sampleRate, ushort bitsPerSample) GetWavParams(VgmStream vgm)
+    {
+        ushort formatTag = vgm.SampleFormat == SampleFormat.Float ? (ushort)3 : (ushort)1;
+        return (formatTag, (ushort)vgm.Channels, (uint)vgm.SampleRate, (ushort)(vgm.SampleSize * 8));
     }
 
     private static uint ClampDataSize(long totalDataBytes)
