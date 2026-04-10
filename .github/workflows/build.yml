@@ -29,27 +29,26 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          # Use Ninja — VS generator always re-runs custom targets,
-          # overwriting our x64 import libs with x86 versions
-          cmake -S vgmstream -B build -G Ninja `
-            -DCMAKE_C_COMPILER=cl `
-            -DCMAKE_BUILD_TYPE=Release `
+          cmake -S vgmstream -B build -G "Visual Studio 17 2022" -A x64 `
             -DBUILD_SHARED_LIBS=ON `
             -DCMAKE_WINDOWS_EXPORT_ALL_SYMBOLS=ON `
             -DBUILD_CLI=OFF -DBUILD_FB2K=OFF -DBUILD_WINAMP=OFF -DBUILD_XMPLAY=OFF `
             -DUSE_MPEG=OFF -DUSE_G719=OFF -DUSE_G7221=OFF -DUSE_CELT=OFF `
             -DUSE_ATRAC9=OFF -DUSE_SPEEX=OFF
 
-          # Pre-generate x64 import libs with names cmake expects
-          # (ext_libs/CMakeLists.txt hardcodes /machine:x86 — we override)
-          New-Item -ItemType Directory -Path build/ext_libs -Force | Out-Null
+          # Build ext_libs targets first (generates x86 import libs, marks
+          # them as up-to-date in MSBuild's incremental tracking)
+          cmake --build build --config Release --target libvorbis ffmpeg
+
+          # Overwrite with x64 import libs — MSBuild won't re-run the
+          # custom commands since the targets are already built
           lib /def:vgmstream/ext_libs/libvorbis.def /machine:x64 /out:build/ext_libs/libvorbis.lib
           lib /def:vgmstream/ext_libs/avcodec-vgmstream-59.def /machine:x64 /out:build/ext_libs/avcodec.lib
           lib /def:vgmstream/ext_libs/avformat-vgmstream-59.def /machine:x64 /out:build/ext_libs/avformat.lib
           lib /def:vgmstream/ext_libs/avutil-vgmstream-57.def /machine:x64 /out:build/ext_libs/avutil.lib
           lib /def:vgmstream/ext_libs/swresample-vgmstream-4.def /machine:x64 /out:build/ext_libs/swresample.lib
 
-          cmake --build build --target libvgmstream_shared
+          cmake --build build --config Release --target libvgmstream_shared
 
       - name: Collect (Windows)
         if: runner.os == 'Windows'
@@ -57,7 +56,7 @@ jobs:
         run: |
           $out = "runtimes/${{ matrix.rid }}/native"
           New-Item -ItemType Directory -Path $out -Force | Out-Null
-          Copy-Item build/src/${{ matrix.lib }} $out
+          Copy-Item build/src/Release/${{ matrix.lib }} $out
 
           @(
             "libvorbis.dll",
