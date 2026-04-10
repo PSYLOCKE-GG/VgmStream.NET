@@ -11,11 +11,10 @@ namespace VgmStream.NET;
 public static unsafe class VgmStreamNative
 {
     private static nint _lib;
-    private static bool _loaded;
-    private static bool _attempted;
+    private static volatile bool _loaded;
+    private static volatile bool _attempted;
     private static readonly object _loadLock = new();
 
-    // --- Function pointers (stored as nint, cast at call site) ---
     private static nint _pGetVersion;
     private static nint _pInit;
     private static nint _pFree;
@@ -63,9 +62,7 @@ public static unsafe class VgmStreamNative
 
             bool isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
             bool isOsx = RuntimeInformation.IsOSPlatform(OSPlatform.OSX);
-
             string libName = isWindows ? "libvgmstream.dll" : isOsx ? "libvgmstream.dylib" : "libvgmstream.so";
-
             string rid = GetRuntimeIdentifier();
             string? assemblyDir = Path.GetDirectoryName(typeof(VgmStreamNative).Assembly.Location);
 
@@ -114,58 +111,53 @@ public static unsafe class VgmStreamNative
         return $"{os}-{arch}";
     }
 
-    private static bool TryResolve(string name, out nint addr)
-    {
-        return NativeLibrary.TryGetExport(_lib, name, out addr);
-    }
-
     private static bool TryResolveAll()
     {
-        return TryResolve("libvgmstream_get_version", out _pGetVersion)
-            && TryResolve("libvgmstream_init", out _pInit)
-            && TryResolve("libvgmstream_free", out _pFree)
-            && TryResolve("libvgmstream_setup", out _pSetup)
-            && TryResolve("libvgmstream_open_stream", out _pOpenStream)
-            && TryResolve("libvgmstream_close_stream", out _pCloseStream)
-            && TryResolve("libvgmstream_render", out _pRender)
-            && TryResolve("libvgmstream_fill", out _pFill)
-            && TryResolve("libvgmstream_get_play_position", out _pGetPlayPosition)
-            && TryResolve("libvgmstream_seek", out _pSeek)
-            && TryResolve("libvgmstream_reset", out _pReset)
-            && TryResolve("libvgmstream_create", out _pCreate)
-            && TryResolve("libvgmstream_set_log", out _pSetLog)
-            && TryResolve("libvgmstream_get_extensions", out _pGetExtensions)
-            && TryResolve("libvgmstream_get_common_extensions", out _pGetCommonExtensions)
-            && TryResolve("libvgmstream_is_valid", out _pIsValid)
-            && TryResolve("libvgmstream_get_title", out _pGetTitle)
-            && TryResolve("libvgmstream_format_describe", out _pFormatDescribe)
-            && TryResolve("libvgmstream_is_virtual_filename", out _pIsVirtualFilename)
-            && TryResolve("libvgmstream_tags_init", out _pTagsInit)
-            && TryResolve("libvgmstream_tags_find", out _pTagsFind)
-            && TryResolve("libvgmstream_tags_next_tag", out _pTagsNextTag)
-            && TryResolve("libvgmstream_tags_free", out _pTagsFree)
-            && TryResolve("libstreamfile_open_from_stdio", out _pOpenFromStdio)
-            && TryResolve("libstreamfile_close", out _pStreamfileClose);
+        bool ok = NativeLibrary.TryGetExport(_lib, "libvgmstream_get_version", out _pGetVersion)
+            && NativeLibrary.TryGetExport(_lib, "libvgmstream_init", out _pInit)
+            && NativeLibrary.TryGetExport(_lib, "libvgmstream_free", out _pFree)
+            && NativeLibrary.TryGetExport(_lib, "libvgmstream_setup", out _pSetup)
+            && NativeLibrary.TryGetExport(_lib, "libvgmstream_open_stream", out _pOpenStream)
+            && NativeLibrary.TryGetExport(_lib, "libvgmstream_close_stream", out _pCloseStream)
+            && NativeLibrary.TryGetExport(_lib, "libvgmstream_render", out _pRender)
+            && NativeLibrary.TryGetExport(_lib, "libvgmstream_fill", out _pFill)
+            && NativeLibrary.TryGetExport(_lib, "libvgmstream_get_play_position", out _pGetPlayPosition)
+            && NativeLibrary.TryGetExport(_lib, "libvgmstream_seek", out _pSeek)
+            && NativeLibrary.TryGetExport(_lib, "libvgmstream_reset", out _pReset)
+            && NativeLibrary.TryGetExport(_lib, "libvgmstream_get_extensions", out _pGetExtensions)
+            && NativeLibrary.TryGetExport(_lib, "libvgmstream_get_common_extensions", out _pGetCommonExtensions)
+            && NativeLibrary.TryGetExport(_lib, "libvgmstream_is_valid", out _pIsValid)
+            && NativeLibrary.TryGetExport(_lib, "libvgmstream_get_title", out _pGetTitle)
+            && NativeLibrary.TryGetExport(_lib, "libvgmstream_format_describe", out _pFormatDescribe)
+            && NativeLibrary.TryGetExport(_lib, "libvgmstream_is_virtual_filename", out _pIsVirtualFilename)
+            && NativeLibrary.TryGetExport(_lib, "libstreamfile_open_from_stdio", out _pOpenFromStdio)
+            && NativeLibrary.TryGetExport(_lib, "libstreamfile_close", out _pStreamfileClose);
+
+        // Optional symbols — resolve if available but don't fail the load
+        NativeLibrary.TryGetExport(_lib, "libvgmstream_create", out _pCreate);
+        NativeLibrary.TryGetExport(_lib, "libvgmstream_set_log", out _pSetLog);
+        NativeLibrary.TryGetExport(_lib, "libvgmstream_tags_init", out _pTagsInit);
+        NativeLibrary.TryGetExport(_lib, "libvgmstream_tags_find", out _pTagsFind);
+        NativeLibrary.TryGetExport(_lib, "libvgmstream_tags_next_tag", out _pTagsNextTag);
+        NativeLibrary.TryGetExport(_lib, "libvgmstream_tags_free", out _pTagsFree);
+
+        return ok;
     }
 
-    internal static void EnsureLoadedPublic() => EnsureLoaded();
-
-    private static void EnsureLoaded()
+    internal static void EnsureLoaded()
     {
         if (!IsAvailable)
             throw new DllNotFoundException(
                 "libvgmstream library is not available. Ensure libvgmstream.dll/.so/.dylib is present in the runtimes folder.");
     }
 
-    // --- Managed struct mirrors ---
-
     /// <summary>Mirrors libvgmstream_format_t.</summary>
-    [StructLayout(LayoutKind.Sequential)]
+    [StructLayout(LayoutKind.Sequential, Pack = 8)]
     public unsafe struct LibVgmstreamFormat
     {
         public int Channels;
         public int SampleRate;
-        public int SampleFormat;        // libvgmstream_sfmt_t (enum = int)
+        public int SampleFormat;
         public int SampleSize;
         public uint ChannelLayout;
         public int SubsongIndex;
@@ -174,9 +166,8 @@ public static unsafe class VgmStreamNative
         public long StreamSamples;
         public long LoopStart;
         public long LoopEnd;
-        public byte LoopFlag;          // C bool = 1 byte
-        public byte PlayForever;       // C bool = 1 byte
-        // 6 bytes padding inserted by compiler for int64 alignment
+        public byte LoopFlag;
+        public byte PlayForever;
         public long PlaySamples;
         public int StreamBitrate;
         public fixed byte CodecName[128];
@@ -190,23 +181,23 @@ public static unsafe class VgmStreamNative
     [StructLayout(LayoutKind.Sequential)]
     public struct LibVgmstreamDecoder
     {
-        public nint Buf;               // void*
+        public nint Buf;
         public int BufSamples;
         public int BufBytes;
-        public byte Done;              // C bool = 1 byte
+        public byte Done;
     }
 
     /// <summary>Mirrors libvgmstream_t (context handle).</summary>
     [StructLayout(LayoutKind.Sequential)]
     public struct LibVgmstreamContext
     {
-        public nint Priv;              // void*
-        public nint Format;            // const libvgmstream_format_t*
-        public nint Decoder;           // libvgmstream_decoder_t*
+        public nint Priv;
+        public nint Format;
+        public nint Decoder;
     }
 
     /// <summary>Mirrors libvgmstream_config_t.</summary>
-    [StructLayout(LayoutKind.Sequential)]
+    [StructLayout(LayoutKind.Sequential, Pack = 8)]
     public struct LibVgmstreamConfig
     {
         public byte DisableConfigOverride;
@@ -216,13 +207,12 @@ public static unsafe class VgmStreamNative
         public byte ForceLoop;
         public byte ReallyForceLoop;
         public byte IgnoreFade;
-        // 1 byte padding for double alignment (compiler-inserted)
         public double LoopCount;
         public double FadeTime;
         public double FadeDelay;
         public int StereoTrack;
         public int AutoDownmixChannels;
-        public int ForceSfmt;          // libvgmstream_sfmt_t
+        public int ForceSfmt;
     }
 
     /// <summary>Mirrors libvgmstream_valid_t.</summary>
@@ -244,31 +234,29 @@ public static unsafe class VgmStreamNative
         public byte SubsongRange;
         public byte RemoveExtension;
         public byte RemoveArchive;
-        public nint Filename;          // const char*
+        public nint Filename;
     }
 
     /// <summary>Mirrors libvgmstream_tags_t.</summary>
     [StructLayout(LayoutKind.Sequential)]
     public struct LibVgmstreamTags
     {
-        public nint Priv;             // void*
-        public nint Key;              // const char*
-        public nint Val;              // const char*
+        public nint Priv;
+        public nint Key;
+        public nint Val;
     }
 
     /// <summary>Mirrors libstreamfile_t (custom IO).</summary>
     [StructLayout(LayoutKind.Sequential)]
     public struct LibStreamfile
     {
-        public nint UserData;          // void*
-        public nint Read;              // function pointer
-        public nint GetSize;           // function pointer
-        public nint GetName;           // function pointer
-        public nint Open;              // function pointer
-        public nint Close;             // function pointer
+        public nint UserData;
+        public nint Read;
+        public nint GetSize;
+        public nint GetName;
+        public nint Open;
+        public nint Close;
     }
-
-    // --- Public API ---
 
     public static uint LibvgmstreamGetVersion()
     {
@@ -339,12 +327,14 @@ public static unsafe class VgmStreamNative
     public static nint LibvgmstreamCreate(nint libsf, int subsong, LibVgmstreamConfig* cfg)
     {
         EnsureLoaded();
+        if (_pCreate == 0) throw new NotSupportedException("libvgmstream_create is not available in this build.");
         return ((delegate* unmanaged[Cdecl]<nint, int, LibVgmstreamConfig*, nint>)_pCreate)(libsf, subsong, cfg);
     }
 
     public static void LibvgmstreamSetLog(int level, nint callback)
     {
         EnsureLoaded();
+        if (_pSetLog == 0) throw new NotSupportedException("libvgmstream_set_log is not available in this build.");
         ((delegate* unmanaged[Cdecl]<int, nint, void>)_pSetLog)(level, callback);
     }
 
@@ -387,24 +377,28 @@ public static unsafe class VgmStreamNative
     public static nint LibvgmstreamTagsInit(nint libsf)
     {
         EnsureLoaded();
+        if (_pTagsInit == 0) throw new NotSupportedException("libvgmstream_tags_init is not available in this build.");
         return ((delegate* unmanaged[Cdecl]<nint, nint>)_pTagsInit)(libsf);
     }
 
     public static void LibvgmstreamTagsFind(nint tags, byte* targetFilename)
     {
         EnsureLoaded();
+        if (_pTagsFind == 0) throw new NotSupportedException("libvgmstream_tags_find is not available in this build.");
         ((delegate* unmanaged[Cdecl]<nint, byte*, void>)_pTagsFind)(tags, targetFilename);
     }
 
     public static byte LibvgmstreamTagsNextTag(nint tags)
     {
         EnsureLoaded();
+        if (_pTagsNextTag == 0) throw new NotSupportedException("libvgmstream_tags_next_tag is not available in this build.");
         return ((delegate* unmanaged[Cdecl]<nint, byte>)_pTagsNextTag)(tags);
     }
 
     public static void LibvgmstreamTagsFree(nint tags)
     {
         EnsureLoaded();
+        if (_pTagsFree == 0) throw new NotSupportedException("libvgmstream_tags_free is not available in this build.");
         ((delegate* unmanaged[Cdecl]<nint, void>)_pTagsFree)(tags);
     }
 

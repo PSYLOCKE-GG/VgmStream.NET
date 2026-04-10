@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Buffers.Binary;
 
 namespace VgmStream.NET;
@@ -8,8 +9,11 @@ namespace VgmStream.NET;
 /// </summary>
 public static class VgmStreamConverter
 {
+    private const uint MaxWavDataSize = uint.MaxValue - 36;
+
     /// <summary>
     /// Converts a game audio file to WAV and writes to the specified output path.
+    /// Creates or overwrites the file at <paramref name="outputPath"/>.
     /// </summary>
     public static void ConvertToWav(string inputPath, string outputPath, VgmStreamConfig? config = null)
     {
@@ -19,6 +23,8 @@ public static class VgmStreamConverter
 
     /// <summary>
     /// Converts a game audio file to WAV and writes to the specified stream.
+    /// When <paramref name="config"/> is null, defaults to ignoring loops so the
+    /// stream has a finite length suitable for WAV output.
     /// </summary>
     public static void ConvertToWav(string inputPath, Stream output, VgmStreamConfig? config = null)
     {
@@ -30,16 +36,11 @@ public static class VgmStreamConverter
         int sampleRate = vgm.SampleRate;
         int sampleSize = vgm.SampleSize;
         int bitsPerSample = sampleSize * 8;
-        int blockAlign = channels * sampleSize;
+        ushort formatTag = vgm.SampleFormat == SampleFormat.Float ? (ushort)3 : (ushort)1;
 
-        // Determine WAV format tag
-        ushort formatTag = vgm.SampleFormat == SampleFormat.Float ? (ushort)3 : (ushort)1; // 3 = IEEE_FLOAT, 1 = PCM
-
-        // Write placeholder WAV header (will update data size at the end)
         long headerStart = output.Position;
         WriteWavHeader(output, formatTag, (ushort)channels, (uint)sampleRate, (ushort)bitsPerSample, 0);
 
-        // Decode and write samples
         long totalDataBytes = 0;
         while (!vgm.Done)
         {
@@ -51,18 +52,19 @@ public static class VgmStreamConverter
             }
         }
 
-        // Update header with actual data size if stream supports seeking
         if (output.CanSeek)
         {
             long endPos = output.Position;
             output.Position = headerStart;
-            WriteWavHeader(output, formatTag, (ushort)channels, (uint)sampleRate, (ushort)bitsPerSample, (uint)totalDataBytes);
+            WriteWavHeader(output, formatTag, (ushort)channels, (uint)sampleRate, (ushort)bitsPerSample, ClampDataSize(totalDataBytes));
             output.Position = endPos;
         }
     }
 
     /// <summary>
     /// Asynchronously converts a game audio file to WAV and writes to the specified stream.
+    /// The decoding itself is CPU-bound and runs synchronously; only the stream writes are async.
+    /// When <paramref name="config"/> is null, defaults to ignoring loops.
     /// </summary>
     public static async Task ConvertToWavAsync(string inputPath, Stream output, VgmStreamConfig? config = null, CancellationToken cancellationToken = default)
     {
@@ -74,7 +76,6 @@ public static class VgmStreamConverter
         int sampleRate = vgm.SampleRate;
         int sampleSize = vgm.SampleSize;
         int bitsPerSample = sampleSize * 8;
-
         ushort formatTag = vgm.SampleFormat == SampleFormat.Float ? (ushort)3 : (ushort)1;
 
         long headerStart = output.Position;
@@ -86,11 +87,20 @@ public static class VgmStreamConverter
             cancellationToken.ThrowIfCancellationRequested();
 
             var samples = vgm.Render();
-            if (samples.Length > 0)
+            int len = samples.Length;
+            if (len > 0)
             {
-                byte[] buffer = samples.ToArray();
-                await output.WriteAsync(buffer, cancellationToken);
-                totalDataBytes += buffer.Length;
+                byte[] buffer = ArrayPool<byte>.Shared.Rent(len);
+                try
+                {
+                    samples.CopyTo(buffer);
+                    await output.WriteAsync(buffer.AsMemory(0, len), cancellationToken);
+                    totalDataBytes += len;
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(buffer);
+                }
             }
         }
 
@@ -98,9 +108,14 @@ public static class VgmStreamConverter
         {
             long endPos = output.Position;
             output.Position = headerStart;
-            WriteWavHeader(output, formatTag, (ushort)channels, (uint)sampleRate, (ushort)bitsPerSample, (uint)totalDataBytes);
+            WriteWavHeader(output, formatTag, (ushort)channels, (uint)sampleRate, (ushort)bitsPerSample, ClampDataSize(totalDataBytes));
             output.Position = endPos;
         }
+    }
+
+    private static uint ClampDataSize(long totalDataBytes)
+    {
+        return totalDataBytes > MaxWavDataSize ? MaxWavDataSize : (uint)totalDataBytes;
     }
 
     private static void WriteWavHeader(Stream output, ushort formatTag, ushort channels, uint sampleRate, ushort bitsPerSample, uint dataSize)
@@ -109,16 +124,14 @@ public static class VgmStreamConverter
 
         ushort blockAlign = (ushort)(channels * (bitsPerSample / 8));
         uint byteRate = sampleRate * blockAlign;
-        uint riffSize = dataSize + 36; // 44 - 8
+        uint riffSize = dataSize + 36;
 
-        // RIFF header
         header[0] = (byte)'R'; header[1] = (byte)'I'; header[2] = (byte)'F'; header[3] = (byte)'F';
         BinaryPrimitives.WriteUInt32LittleEndian(header[4..], riffSize);
         header[8] = (byte)'W'; header[9] = (byte)'A'; header[10] = (byte)'V'; header[11] = (byte)'E';
 
-        // fmt sub-chunk
         header[12] = (byte)'f'; header[13] = (byte)'m'; header[14] = (byte)'t'; header[15] = (byte)' ';
-        BinaryPrimitives.WriteUInt32LittleEndian(header[16..], 16); // sub-chunk size
+        BinaryPrimitives.WriteUInt32LittleEndian(header[16..], 16);
         BinaryPrimitives.WriteUInt16LittleEndian(header[20..], formatTag);
         BinaryPrimitives.WriteUInt16LittleEndian(header[22..], channels);
         BinaryPrimitives.WriteUInt32LittleEndian(header[24..], sampleRate);
@@ -126,7 +139,6 @@ public static class VgmStreamConverter
         BinaryPrimitives.WriteUInt16LittleEndian(header[32..], blockAlign);
         BinaryPrimitives.WriteUInt16LittleEndian(header[34..], bitsPerSample);
 
-        // data sub-chunk
         header[36] = (byte)'d'; header[37] = (byte)'a'; header[38] = (byte)'t'; header[39] = (byte)'a';
         BinaryPrimitives.WriteUInt32LittleEndian(header[40..], dataSize);
 

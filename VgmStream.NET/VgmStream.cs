@@ -1,4 +1,3 @@
-using System.Runtime.InteropServices;
 using System.Text;
 
 namespace VgmStream.NET;
@@ -9,7 +8,7 @@ namespace VgmStream.NET;
 /// </summary>
 public sealed unsafe class VgmStream : IDisposable
 {
-    private readonly VgmStreamHandle _handle;
+    private nint _lib;
     private bool _disposed;
 
     /// <summary>
@@ -20,24 +19,24 @@ public sealed unsafe class VgmStream : IDisposable
     /// <param name="config">Optional playback configuration.</param>
     public VgmStream(string filePath, int subsong = 0, VgmStreamConfig? config = null)
     {
-        VgmStreamNative.EnsureLoadedPublic();
+        ArgumentNullException.ThrowIfNull(filePath);
+        if (filePath.Contains('\0'))
+            throw new ArgumentException("File path must not contain null characters.", nameof(filePath));
 
-        nint lib = VgmStreamNative.LibvgmstreamInit();
-        if (lib == 0)
+        VgmStreamNative.EnsureLoaded();
+
+        _lib = VgmStreamNative.LibvgmstreamInit();
+        if (_lib == 0)
             throw new InvalidOperationException("Failed to initialize vgmstream context.");
-
-        _handle = new VgmStreamHandle(lib);
 
         try
         {
-            // Apply config if provided
             if (config != null)
             {
                 var nativeCfg = ConfigToNative(config);
-                VgmStreamNative.LibvgmstreamSetup(lib, &nativeCfg);
+                VgmStreamNative.LibvgmstreamSetup(_lib, &nativeCfg);
             }
 
-            // Open streamfile from path
             byte[] pathBytes = Encoding.UTF8.GetBytes(filePath + '\0');
             nint sf;
             fixed (byte* pPath = pathBytes)
@@ -50,7 +49,7 @@ public sealed unsafe class VgmStream : IDisposable
 
             try
             {
-                int result = VgmStreamNative.LibvgmstreamOpenStream(lib, sf, subsong);
+                int result = VgmStreamNative.LibvgmstreamOpenStream(_lib, sf, subsong);
                 if (result < 0)
                     throw new InvalidOperationException($"Failed to open stream: error {result}. File may not be a supported format.");
             }
@@ -59,17 +58,15 @@ public sealed unsafe class VgmStream : IDisposable
                 VgmStreamNative.LibstreamfileClose(sf);
             }
 
-            // Cache format info
             ReadFormatInfo();
         }
         catch
         {
-            _handle.Dispose();
+            VgmStreamNative.LibvgmstreamFree(_lib);
+            _lib = 0;
             throw;
         }
     }
-
-    // --- Format properties (cached after open) ---
 
     public int Channels { get; private set; }
     public int SampleRate { get; private set; }
@@ -96,7 +93,7 @@ public sealed unsafe class VgmStream : IDisposable
         get
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            var ctx = (VgmStreamNative.LibVgmstreamContext*)_handle.DangerousGetHandle();
+            var ctx = (VgmStreamNative.LibVgmstreamContext*)_lib;
             if (ctx->Decoder == 0) return true;
             var decoder = (VgmStreamNative.LibVgmstreamDecoder*)ctx->Decoder;
             return decoder->Done != 0;
@@ -111,11 +108,11 @@ public sealed unsafe class VgmStream : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        int result = VgmStreamNative.LibvgmstreamRender(_handle.DangerousGetHandle());
+        int result = VgmStreamNative.LibvgmstreamRender(_lib);
         if (result < 0)
             throw new InvalidOperationException($"Render failed: error {result}");
 
-        var ctx = (VgmStreamNative.LibVgmstreamContext*)_handle.DangerousGetHandle();
+        var ctx = (VgmStreamNative.LibVgmstreamContext*)_lib;
         var decoder = (VgmStreamNative.LibVgmstreamDecoder*)ctx->Decoder;
 
         if (decoder->Buf == 0 || decoder->BufBytes <= 0)
@@ -141,12 +138,12 @@ public sealed unsafe class VgmStream : IDisposable
 
         fixed (byte* pBuf = buffer)
         {
-            int result = VgmStreamNative.LibvgmstreamFill(_handle.DangerousGetHandle(), pBuf, bufSamples);
+            int result = VgmStreamNative.LibvgmstreamFill(_lib, pBuf, bufSamples);
             if (result < 0)
                 throw new InvalidOperationException($"Fill failed: error {result}");
         }
 
-        var ctx = (VgmStreamNative.LibVgmstreamContext*)_handle.DangerousGetHandle();
+        var ctx = (VgmStreamNative.LibVgmstreamContext*)_lib;
         var decoder = (VgmStreamNative.LibVgmstreamDecoder*)ctx->Decoder;
         return decoder->BufBytes;
     }
@@ -159,7 +156,7 @@ public sealed unsafe class VgmStream : IDisposable
         get
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            return VgmStreamNative.LibvgmstreamGetPlayPosition(_handle.DangerousGetHandle());
+            return VgmStreamNative.LibvgmstreamGetPlayPosition(_lib);
         }
     }
 
@@ -169,7 +166,7 @@ public sealed unsafe class VgmStream : IDisposable
     public void Seek(long sample)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        VgmStreamNative.LibvgmstreamSeek(_handle.DangerousGetHandle(), sample);
+        VgmStreamNative.LibvgmstreamSeek(_lib, sample);
     }
 
     /// <summary>
@@ -178,7 +175,7 @@ public sealed unsafe class VgmStream : IDisposable
     public void Reset()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        VgmStreamNative.LibvgmstreamReset(_handle.DangerousGetHandle());
+        VgmStreamNative.LibvgmstreamReset(_lib);
     }
 
     /// <summary>
@@ -188,11 +185,9 @@ public sealed unsafe class VgmStream : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         byte* buf = stackalloc byte[4096];
-        VgmStreamNative.LibvgmstreamFormatDescribe(_handle.DangerousGetHandle(), buf, 4096);
+        VgmStreamNative.LibvgmstreamFormatDescribe(_lib, buf, 4096);
         return VgmStreamNative.FixedStringToManaged(buf, 4096);
     }
-
-    // --- Static helpers ---
 
     /// <summary>
     /// Whether the native vgmstream library is available.
@@ -252,14 +247,16 @@ public sealed unsafe class VgmStream : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        _handle.Dispose();
+        if (_lib != 0)
+        {
+            VgmStreamNative.LibvgmstreamFree(_lib);
+            _lib = 0;
+        }
     }
-
-    // --- Private helpers ---
 
     private void ReadFormatInfo()
     {
-        var ctx = (VgmStreamNative.LibVgmstreamContext*)_handle.DangerousGetHandle();
+        var ctx = (VgmStreamNative.LibVgmstreamContext*)_lib;
         if (ctx->Format == 0) return;
 
         var fmt = (VgmStreamNative.LibVgmstreamFormat*)ctx->Format;

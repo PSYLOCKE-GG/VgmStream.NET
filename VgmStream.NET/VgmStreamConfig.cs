@@ -13,7 +13,7 @@ public record VgmStreamConfig
     public bool ForceLoop { get; init; }
     public bool ReallyForceLoop { get; init; }
     public bool IgnoreFade { get; init; }
-    public double LoopCount { get; init; } = 2.0;
+    public double LoopCount { get; init; } = 1.0;
     public double FadeTime { get; init; } = 10.0;
     public double FadeDelay { get; init; }
     public int StereoTrack { get; init; }

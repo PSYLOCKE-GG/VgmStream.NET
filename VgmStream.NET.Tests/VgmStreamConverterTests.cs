@@ -3,10 +3,6 @@ using Xunit;
 
 namespace VgmStream.NET.Tests;
 
-/// <summary>
-/// Tests for VgmStreamConverter WAV header writing.
-/// These are pure managed tests that don't require the native library.
-/// </summary>
 public class VgmStreamConverterTests
 {
     [Fact]
@@ -26,27 +22,25 @@ public class VgmStreamConverterTests
         Assert.False(config.PlayForever);
         Assert.False(config.IgnoreLoop);
         Assert.False(config.ForceLoop);
-        Assert.Equal(2.0, config.LoopCount);
+        Assert.Equal(1.0, config.LoopCount);
         Assert.Equal(10.0, config.FadeTime);
         Assert.Equal(0.0, config.FadeDelay);
         Assert.Equal(0, config.AutoDownmixChannels);
         Assert.Null(config.ForceSampleFormat);
     }
 
-    [Fact]
+    [SkippableFact]
     public void IsValid_KnownExtension_ReturnsTrue()
     {
-        if (!VgmStreamNative.IsAvailable)
-            return; // skip if native not available
+        Skip.IfNot(VgmStreamNative.IsAvailable, "Native library not available");
 
         Assert.True(VgmStream.IsValid("test.adx"));
     }
 
-    [Fact]
+    [SkippableFact]
     public void IsValid_UnknownExtension_ReturnsFalse()
     {
-        if (!VgmStreamNative.IsAvailable)
-            return; // skip if native not available
+        Skip.IfNot(VgmStreamNative.IsAvailable, "Native library not available");
 
         Assert.False(VgmStream.IsValid("test.xyz123"));
     }
