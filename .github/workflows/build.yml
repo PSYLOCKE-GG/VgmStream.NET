@@ -93,17 +93,27 @@ jobs:
           mkdir -p "$out"
           cp build/src/${{ matrix.lib }} "$out/"
 
-          # Bundle shared libs so consumers don't need system packages.
-          # Resolve symlinks to get the actual versioned files.
-          for lib in vorbis vorbisfile ogg avcodec avformat avutil swresample; do
+          # Bundle shared libs with unversioned names so consumers don't
+          # need system packages. Use patchelf to rewrite all references.
+          bundled="vorbis vorbisfile ogg avcodec avformat avutil swresample"
+          for lib in $bundled; do
             so=$(ldconfig -p | grep "lib${lib}\\.so\\." | grep x86-64 | awk '{print $NF}' | head -1)
             if [ -n "$so" ] && [ -f "$so" ]; then
               cp "$so" "$out/lib${lib}.so"
+              patchelf --set-soname "lib${lib}.so" "$out/lib${lib}.so"
             fi
           done
 
-          # Set RPATH so libvgmstream.so finds bundled libs in same dir
-          patchelf --set-rpath '$ORIGIN' "$out/${{ matrix.lib }}"
+          # Rewrite all NEEDED entries and RPATH in every bundled lib
+          for f in "$out"/*.so; do
+            for lib in $bundled; do
+              versioned=$(patchelf --print-needed "$f" | grep "lib${lib}\\.so" || true)
+              if [ -n "$versioned" ] && [ "$versioned" != "lib${lib}.so" ]; then
+                patchelf --replace-needed "$versioned" "lib${lib}.so" "$f"
+              fi
+            done
+            patchelf --set-rpath '$ORIGIN' "$f"
+          done
 
       # ── macOS ──
       - name: Install deps (macOS)
