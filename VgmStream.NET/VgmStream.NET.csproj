@@ -10,7 +10,7 @@
 
         <!-- NuGet package metadata -->
         <PackageId>VgmStream.NET</PackageId>
-        <Version>0.1.1</Version>
+        <Version>0.2.0</Version>
         <Authors>PSYLOCKE-GG</Authors>
         <Description>C# P/Invoke wrapper for vgmstream — decode hundreds of video game audio formats</Description>
         <PackageLicenseExpression>ISC</PackageLicenseExpression>
@@ -32,6 +32,10 @@
     <!-- Pack the README into the NuGet package root -->
     <ItemGroup>
         <None Include="..\README.md" Pack="true" PackagePath="" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <InternalsVisibleTo Include="VgmStream.NET.Tests" />
     </ItemGroup>
 
     <!-- Include native binaries in build output (placed by CI or manually) -->

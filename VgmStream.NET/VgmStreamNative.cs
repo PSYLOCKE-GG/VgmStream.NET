@@ -1,28 +1,55 @@
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 
 namespace VgmStream.NET;
 
 /// <summary>
-/// P/Invoke bindings for the libvgmstream shared library.
-/// Uses NativeLibrary.TryLoad + function pointers for runtime binding.
-/// All vgmstream functions use __cdecl calling convention on all platforms.
+/// P/Invoke surface for the libvgmstream shared library. Entry points are
+/// source-generated via <c>[LibraryImport]</c>; the type initializer registers
+/// a <see cref="NativeLibrary.SetDllImportResolver"/> that probes
+/// <c>runtimes/{RID}/native/</c> before falling back to the OS search path.
 /// </summary>
-public static unsafe class VgmStreamNative
+/// <remarks>
+/// All vgmstream functions use <c>cdecl</c> on every platform. Optional symbols
+/// (<c>libvgmstream_create</c>, <c>libvgmstream_set_log</c>, the tag APIs) are
+/// gated through <see cref="NativeLibrary.TryGetExport"/> feature flags rather
+/// than being declared as <c>[LibraryImport]</c> — calling a missing entry
+/// point would surface as <see cref="EntryPointNotFoundException"/> at call
+/// site, which is less friendly than the <see cref="NotSupportedException"/>
+/// the feature-flagged wrappers throw.
+/// </remarks>
+internal static unsafe partial class VgmStreamNative
 {
-    private static nint _lib;
-    private static volatile bool _loaded;
-    private static volatile bool _attempted;
-    private static readonly object _loadLock = new();
+    private const string Lib = "libvgmstream";
+
     private static readonly List<string> _probedPaths = [];
     private static string? _loadError;
 
+    private static readonly Lazy<nint> _libHandle = new(LoadLibrary);
+
+    static VgmStreamNative()
+    {
+        NativeLibrary.SetDllImportResolver(typeof(VgmStreamNative).Assembly, Resolver);
+    }
+
+    private static nint Resolver(string libraryName, Assembly assembly, DllImportSearchPath? searchPath) =>
+        libraryName == Lib ? _libHandle.Value : 0;
+
     /// <summary>
-    /// Paths probed during the load attempt, in order. Populated after the first
-    /// access of <see cref="IsAvailable"/>. Useful for diagnosing missing-native
-    /// failures — the thrown <see cref="DllNotFoundException"/> already includes
-    /// these but calling code that only inspects <see cref="IsAvailable"/>
-    /// needs a way to see what was tried.
+    /// Whether the native library was successfully loaded. False when the
+    /// shared library couldn't be found in any probed location, when loading
+    /// failed (missing dependency, arch mismatch), or when required exports
+    /// are absent (native build predates the public libvgmstream API).
+    /// </summary>
+    public static bool IsAvailable => _libHandle.Value != 0 && _allRequiredExportsResolved.Value;
+
+    /// <summary>
+    /// Paths probed during the load attempt, in order. Populated after the
+    /// first access of <see cref="IsAvailable"/>. Useful for diagnosing
+    /// missing-native failures — <see cref="EnsureLoaded"/> already includes
+    /// these in the thrown exception but callers that only inspect
+    /// <see cref="IsAvailable"/> need a way to see what was tried.
     /// </summary>
     public static IReadOnlyList<string> ProbedPaths => _probedPaths;
 
@@ -33,175 +60,6 @@ public static unsafe class VgmStreamNative
     /// successfully or before any probe has run.
     /// </summary>
     public static string? LoadError => _loadError;
-
-    private static nint _pGetVersion;
-    private static nint _pInit;
-    private static nint _pFree;
-    private static nint _pSetup;
-    private static nint _pOpenStream;
-    private static nint _pCloseStream;
-    private static nint _pRender;
-    private static nint _pFill;
-    private static nint _pGetPlayPosition;
-    private static nint _pSeek;
-    private static nint _pReset;
-    private static nint _pCreate;
-    private static nint _pSetLog;
-    private static nint _pGetExtensions;
-    private static nint _pGetCommonExtensions;
-    private static nint _pIsValid;
-    private static nint _pGetTitle;
-    private static nint _pFormatDescribe;
-    private static nint _pIsVirtualFilename;
-    private static nint _pTagsInit;
-    private static nint _pTagsFind;
-    private static nint _pTagsNextTag;
-    private static nint _pTagsFree;
-    private static nint _pOpenFromStdio;
-    private static nint _pOpenBuffered;
-    private static nint _pStreamfileClose;
-
-    /// <summary>
-    /// Whether the native library was successfully loaded and all functions resolved.
-    /// </summary>
-    public static bool IsAvailable
-    {
-        get
-        {
-            if (!_attempted) TryLoad();
-            return _loaded;
-        }
-    }
-
-    private static void TryLoad()
-    {
-        lock (_loadLock)
-        {
-            if (_attempted) return;
-            _attempted = true;
-
-            bool isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
-            bool isOsx = RuntimeInformation.IsOSPlatform(OSPlatform.OSX);
-            string libName = isWindows ? "libvgmstream.dll" : isOsx ? "libvgmstream.dylib" : "libvgmstream.so";
-            string rid = GetRuntimeIdentifier();
-
-            // Probe both the assembly-containing directory and AppContext.BaseDirectory.
-            // They usually coincide, but single-file publish, AssemblyLoadContext isolation,
-            // or NuGet cache assemblies can make them differ — probing both covers every
-            // real-world layout without us having to guess which one applies.
-            string? assemblyDir = string.IsNullOrEmpty(typeof(VgmStreamNative).Assembly.Location)
-                ? null
-                : Path.GetDirectoryName(typeof(VgmStreamNative).Assembly.Location);
-
-            var roots = new List<string>(2);
-            if (!string.IsNullOrEmpty(assemblyDir))
-                roots.Add(assemblyDir);
-            if (!string.IsNullOrEmpty(AppContext.BaseDirectory)
-                && !roots.Contains(AppContext.BaseDirectory, StringComparer.OrdinalIgnoreCase))
-                roots.Add(AppContext.BaseDirectory);
-
-            foreach (string root in roots)
-            {
-                foreach (string candidate in new[]
-                {
-                    Path.Combine(root, "runtimes", rid, "native", libName),
-                    Path.Combine(root, libName),
-                })
-                {
-                    _probedPaths.Add(candidate);
-                    if (!File.Exists(candidate))
-                        continue;
-                    try
-                    {
-                        if (NativeLibrary.TryLoad(candidate, out _lib))
-                            goto loaded;
-                    }
-                    catch (Exception ex)
-                    {
-                        _loadError = $"{candidate}: {ex.GetType().Name}: {ex.Message}";
-                    }
-                }
-            }
-
-            // NuGet assembly-directed fallback: uses deps.json to resolve the native
-            // asset relative to the NuGet cache when the packaged runtime files
-            // weren't copied to the output directory.
-            _probedPaths.Add($"(assembly-directed) {libName}");
-            NativeLibrary.TryLoad(libName, typeof(VgmStreamNative).Assembly, null, out _lib);
-            if (_lib != 0) goto loaded;
-
-            // OS default search path — last resort.
-            _probedPaths.Add($"(OS default) {libName}");
-            NativeLibrary.TryLoad(libName, out _lib);
-
-            loaded:
-            if (_lib == 0)
-            {
-                _loadError ??= $"{libName} not found in any probed location";
-                return;
-            }
-
-            if (!TryResolveAll())
-            {
-                _loadError = $"{libName} loaded but required exports are missing "
-                    + "(native build mismatch — rebuild libvgmstream with the public API enabled)";
-                NativeLibrary.Free(_lib);
-                _lib = 0;
-                return;
-            }
-
-            _loaded = true;
-        }
-    }
-
-    private static string GetRuntimeIdentifier()
-    {
-        bool isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
-        bool isOsx = RuntimeInformation.IsOSPlatform(OSPlatform.OSX);
-        string arch = RuntimeInformation.OSArchitecture switch
-        {
-            Architecture.X64 => "x64",
-            Architecture.Arm64 => "arm64",
-            Architecture.X86 => "x86",
-            _ => "x64",
-        };
-        string os = isWindows ? "win" : isOsx ? "osx" : "linux";
-        return $"{os}-{arch}";
-    }
-
-    private static bool TryResolveAll()
-    {
-        bool ok = NativeLibrary.TryGetExport(_lib, "libvgmstream_get_version", out _pGetVersion)
-            && NativeLibrary.TryGetExport(_lib, "libvgmstream_init", out _pInit)
-            && NativeLibrary.TryGetExport(_lib, "libvgmstream_free", out _pFree)
-            && NativeLibrary.TryGetExport(_lib, "libvgmstream_setup", out _pSetup)
-            && NativeLibrary.TryGetExport(_lib, "libvgmstream_open_stream", out _pOpenStream)
-            && NativeLibrary.TryGetExport(_lib, "libvgmstream_close_stream", out _pCloseStream)
-            && NativeLibrary.TryGetExport(_lib, "libvgmstream_render", out _pRender)
-            && NativeLibrary.TryGetExport(_lib, "libvgmstream_fill", out _pFill)
-            && NativeLibrary.TryGetExport(_lib, "libvgmstream_get_play_position", out _pGetPlayPosition)
-            && NativeLibrary.TryGetExport(_lib, "libvgmstream_seek", out _pSeek)
-            && NativeLibrary.TryGetExport(_lib, "libvgmstream_reset", out _pReset)
-            && NativeLibrary.TryGetExport(_lib, "libvgmstream_get_extensions", out _pGetExtensions)
-            && NativeLibrary.TryGetExport(_lib, "libvgmstream_get_common_extensions", out _pGetCommonExtensions)
-            && NativeLibrary.TryGetExport(_lib, "libvgmstream_is_valid", out _pIsValid)
-            && NativeLibrary.TryGetExport(_lib, "libvgmstream_get_title", out _pGetTitle)
-            && NativeLibrary.TryGetExport(_lib, "libvgmstream_format_describe", out _pFormatDescribe)
-            && NativeLibrary.TryGetExport(_lib, "libvgmstream_is_virtual_filename", out _pIsVirtualFilename)
-            && NativeLibrary.TryGetExport(_lib, "libstreamfile_open_from_stdio", out _pOpenFromStdio)
-            && NativeLibrary.TryGetExport(_lib, "libstreamfile_open_buffered", out _pOpenBuffered)
-            && NativeLibrary.TryGetExport(_lib, "libstreamfile_close", out _pStreamfileClose);
-
-        // Optional symbols — resolve if available but don't fail the load
-        NativeLibrary.TryGetExport(_lib, "libvgmstream_create", out _pCreate);
-        NativeLibrary.TryGetExport(_lib, "libvgmstream_set_log", out _pSetLog);
-        NativeLibrary.TryGetExport(_lib, "libvgmstream_tags_init", out _pTagsInit);
-        NativeLibrary.TryGetExport(_lib, "libvgmstream_tags_find", out _pTagsFind);
-        NativeLibrary.TryGetExport(_lib, "libvgmstream_tags_next_tag", out _pTagsNextTag);
-        NativeLibrary.TryGetExport(_lib, "libvgmstream_tags_free", out _pTagsFree);
-
-        return ok;
-    }
 
     internal static void EnsureLoaded()
     {
@@ -218,6 +76,163 @@ public static unsafe class VgmStreamNative
         }
         throw new DllNotFoundException(msg.ToString());
     }
+
+    private static nint LoadLibrary()
+    {
+        string file = GetLibraryFileName();
+        string rid = GetRuntimeIdentifier();
+
+        // Probe both the assembly-containing directory and AppContext.BaseDirectory.
+        // They usually coincide, but single-file publish, AssemblyLoadContext
+        // isolation, or NuGet cache assemblies can make them differ — probing
+        // both covers every real-world layout without guessing.
+        string? asmLoc = typeof(VgmStreamNative).Assembly.Location;
+        string? asmDir = string.IsNullOrEmpty(asmLoc) ? null : Path.GetDirectoryName(asmLoc);
+
+        var roots = new List<string>(2);
+        if (!string.IsNullOrEmpty(asmDir))
+            roots.Add(asmDir);
+        if (!string.IsNullOrEmpty(AppContext.BaseDirectory)
+            && !roots.Contains(AppContext.BaseDirectory, StringComparer.OrdinalIgnoreCase))
+            roots.Add(AppContext.BaseDirectory);
+
+        foreach (string root in roots)
+        {
+            foreach (string candidate in new[]
+            {
+                Path.Combine(root, "runtimes", rid, "native", file),
+                Path.Combine(root, file),
+            })
+            {
+                _probedPaths.Add(candidate);
+                if (!File.Exists(candidate))
+                    continue;
+                try
+                {
+                    if (NativeLibrary.TryLoad(candidate, out nint handle))
+                        return handle;
+                }
+                catch (Exception ex)
+                {
+                    _loadError = $"{candidate}: {ex.GetType().Name}: {ex.Message}";
+                }
+            }
+        }
+
+        // Name-only overload — bypasses the resolver, so no re-entry. Falls
+        // back to the OS default search path.
+        _probedPaths.Add($"(OS default) {file}");
+        if (NativeLibrary.TryLoad(file, out nint osHandle))
+            return osHandle;
+
+        _loadError ??= $"{file} not found in any probed location";
+        return 0;
+    }
+
+    private static string GetLibraryFileName()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return "libvgmstream.dll";
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX)) return "libvgmstream.dylib";
+        return "libvgmstream.so";
+    }
+
+    private static string GetRuntimeIdentifier()
+    {
+        string os = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "win"
+                  : RuntimeInformation.IsOSPlatform(OSPlatform.OSX) ? "osx"
+                  : "linux";
+
+        string arch = RuntimeInformation.OSArchitecture switch
+        {
+            Architecture.X64 => "x64",
+            Architecture.Arm64 => "arm64",
+            Architecture.X86 => "x86",
+            _ => "x64",
+        };
+
+        return $"{os}-{arch}";
+    }
+
+    // ── Required-exports self-check ──
+    //
+    // P/Invoke via [LibraryImport] binds lazily — the symbol is resolved on
+    // first call, and a missing export surfaces as EntryPointNotFoundException
+    // at that call site. Eagerly probing every required symbol at IsAvailable
+    // evaluation time mirrors the pre-refactor semantics (IsAvailable=false
+    // when any required export is absent) and gives callers a single
+    // predictable signal instead of failures scattered across call sites.
+
+    private static readonly string[] _requiredExports =
+    [
+        "libvgmstream_get_version",
+        "libvgmstream_init",
+        "libvgmstream_free",
+        "libvgmstream_setup",
+        "libvgmstream_open_stream",
+        "libvgmstream_close_stream",
+        "libvgmstream_render",
+        "libvgmstream_fill",
+        "libvgmstream_get_play_position",
+        "libvgmstream_seek",
+        "libvgmstream_reset",
+        "libvgmstream_get_extensions",
+        "libvgmstream_get_common_extensions",
+        "libvgmstream_is_valid",
+        "libvgmstream_get_title",
+        "libvgmstream_format_describe",
+        "libvgmstream_is_virtual_filename",
+        "libstreamfile_open_from_stdio",
+        "libstreamfile_open_buffered",
+        "libstreamfile_close",
+    ];
+
+    private static readonly Lazy<bool> _allRequiredExportsResolved = new(() =>
+    {
+        nint handle = _libHandle.Value;
+        if (handle == 0) return false;
+
+        foreach (var name in _requiredExports)
+        {
+            if (!NativeLibrary.TryGetExport(handle, name, out _))
+            {
+                _loadError = $"loaded {GetLibraryFileName()} is missing required export '{name}' "
+                    + "(native build predates the public libvgmstream API — rebuild from a newer vgmstream)";
+                return false;
+            }
+        }
+        return true;
+    });
+
+    // ── Optional-feature flags ──
+    //
+    // The libvgmstream_create / libvgmstream_set_log / libvgmstream_tags_* APIs
+    // were added after the initial public API release. Probe them individually
+    // so callers can feature-detect without catching exceptions.
+
+    private static readonly Lazy<bool> _hasCreate = new(() => HasExport("libvgmstream_create"));
+    private static readonly Lazy<bool> _hasSetLog = new(() => HasExport("libvgmstream_set_log"));
+    private static readonly Lazy<bool> _hasTags = new(() =>
+        HasExport("libvgmstream_tags_init")
+        && HasExport("libvgmstream_tags_find")
+        && HasExport("libvgmstream_tags_next_tag")
+        && HasExport("libvgmstream_tags_free"));
+
+    /// <summary>Whether <see cref="LibvgmstreamCreate"/> is available in the loaded native build.</summary>
+    public static bool IsCreateSupported => _hasCreate.Value;
+
+    /// <summary>Whether <see cref="LibvgmstreamSetLog"/> is available in the loaded native build.</summary>
+    public static bool IsSetLogSupported => _hasSetLog.Value;
+
+    /// <summary>Whether the <c>libvgmstream_tags_*</c> APIs are available in the loaded native build.</summary>
+    public static bool IsTagsSupported => _hasTags.Value;
+
+    private static bool HasExport(string name)
+    {
+        nint handle = _libHandle.Value;
+        return handle != 0 && NativeLibrary.TryGetExport(handle, name, out _);
+    }
+
+    // ── Struct types mirroring libvgmstream headers ──
 
     /// <summary>Mirrors libvgmstream_format_t.</summary>
     [StructLayout(LayoutKind.Sequential, Pack = 8)]
@@ -326,175 +341,172 @@ public static unsafe class VgmStreamNative
         public nint Close;
     }
 
-    public static uint LibvgmstreamGetVersion()
-    {
-        EnsureLoaded();
-        return ((delegate* unmanaged[Cdecl]<uint>)_pGetVersion)();
-    }
+    // ── Required entry points ──
 
-    public static nint LibvgmstreamInit()
-    {
-        EnsureLoaded();
-        return ((delegate* unmanaged[Cdecl]<nint>)_pInit)();
-    }
+    [LibraryImport(Lib, EntryPoint = "libvgmstream_get_version")]
+    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    internal static partial uint LibvgmstreamGetVersion();
 
-    public static void LibvgmstreamFree(nint lib)
-    {
-        EnsureLoaded();
-        ((delegate* unmanaged[Cdecl]<nint, void>)_pFree)(lib);
-    }
+    [LibraryImport(Lib, EntryPoint = "libvgmstream_init")]
+    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    internal static partial nint LibvgmstreamInit();
 
-    public static void LibvgmstreamSetup(nint lib, LibVgmstreamConfig* cfg)
-    {
-        EnsureLoaded();
-        ((delegate* unmanaged[Cdecl]<nint, LibVgmstreamConfig*, void>)_pSetup)(lib, cfg);
-    }
+    [LibraryImport(Lib, EntryPoint = "libvgmstream_free")]
+    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    internal static partial void LibvgmstreamFree(nint lib);
 
-    public static int LibvgmstreamOpenStream(nint lib, nint libsf, int subsong)
-    {
-        EnsureLoaded();
-        return ((delegate* unmanaged[Cdecl]<nint, nint, int, int>)_pOpenStream)(lib, libsf, subsong);
-    }
+    [LibraryImport(Lib, EntryPoint = "libvgmstream_setup")]
+    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    internal static partial void LibvgmstreamSetup(nint lib, LibVgmstreamConfig* cfg);
 
-    public static void LibvgmstreamCloseStream(nint lib)
-    {
-        EnsureLoaded();
-        ((delegate* unmanaged[Cdecl]<nint, void>)_pCloseStream)(lib);
-    }
+    [LibraryImport(Lib, EntryPoint = "libvgmstream_open_stream")]
+    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    internal static partial int LibvgmstreamOpenStream(nint lib, nint libsf, int subsong);
 
-    public static int LibvgmstreamRender(nint lib)
-    {
-        EnsureLoaded();
-        return ((delegate* unmanaged[Cdecl]<nint, int>)_pRender)(lib);
-    }
+    [LibraryImport(Lib, EntryPoint = "libvgmstream_close_stream")]
+    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    internal static partial void LibvgmstreamCloseStream(nint lib);
 
-    public static int LibvgmstreamFill(nint lib, void* buf, int bufSamples)
-    {
-        EnsureLoaded();
-        return ((delegate* unmanaged[Cdecl]<nint, void*, int, int>)_pFill)(lib, buf, bufSamples);
-    }
+    [LibraryImport(Lib, EntryPoint = "libvgmstream_render")]
+    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    internal static partial int LibvgmstreamRender(nint lib);
 
-    public static long LibvgmstreamGetPlayPosition(nint lib)
-    {
-        EnsureLoaded();
-        return ((delegate* unmanaged[Cdecl]<nint, long>)_pGetPlayPosition)(lib);
-    }
+    [LibraryImport(Lib, EntryPoint = "libvgmstream_fill")]
+    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    internal static partial int LibvgmstreamFill(nint lib, void* buf, int bufSamples);
 
-    public static void LibvgmstreamSeek(nint lib, long sample)
-    {
-        EnsureLoaded();
-        ((delegate* unmanaged[Cdecl]<nint, long, void>)_pSeek)(lib, sample);
-    }
+    [LibraryImport(Lib, EntryPoint = "libvgmstream_get_play_position")]
+    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    internal static partial long LibvgmstreamGetPlayPosition(nint lib);
 
-    public static void LibvgmstreamReset(nint lib)
-    {
-        EnsureLoaded();
-        ((delegate* unmanaged[Cdecl]<nint, void>)_pReset)(lib);
-    }
+    [LibraryImport(Lib, EntryPoint = "libvgmstream_seek")]
+    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    internal static partial void LibvgmstreamSeek(nint lib, long sample);
 
-    public static nint LibvgmstreamCreate(nint libsf, int subsong, LibVgmstreamConfig* cfg)
-    {
-        EnsureLoaded();
-        if (_pCreate == 0) throw new NotSupportedException("libvgmstream_create is not available in this build.");
-        return ((delegate* unmanaged[Cdecl]<nint, int, LibVgmstreamConfig*, nint>)_pCreate)(libsf, subsong, cfg);
-    }
+    [LibraryImport(Lib, EntryPoint = "libvgmstream_reset")]
+    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    internal static partial void LibvgmstreamReset(nint lib);
 
-    public static void LibvgmstreamSetLog(int level, nint callback)
-    {
-        EnsureLoaded();
-        if (_pSetLog == 0) throw new NotSupportedException("libvgmstream_set_log is not available in this build.");
-        ((delegate* unmanaged[Cdecl]<int, nint, void>)_pSetLog)(level, callback);
-    }
+    [LibraryImport(Lib, EntryPoint = "libvgmstream_get_extensions")]
+    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    internal static partial byte** LibvgmstreamGetExtensions(int* size);
 
-    public static byte** LibvgmstreamGetExtensions(int* size)
-    {
-        EnsureLoaded();
-        return ((delegate* unmanaged[Cdecl]<int*, byte**>)_pGetExtensions)(size);
-    }
+    [LibraryImport(Lib, EntryPoint = "libvgmstream_get_common_extensions")]
+    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    internal static partial byte** LibvgmstreamGetCommonExtensions(int* size);
 
-    public static byte** LibvgmstreamGetCommonExtensions(int* size)
-    {
-        EnsureLoaded();
-        return ((delegate* unmanaged[Cdecl]<int*, byte**>)_pGetCommonExtensions)(size);
-    }
+    [LibraryImport(Lib, EntryPoint = "libvgmstream_is_valid")]
+    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    internal static partial byte LibvgmstreamIsValid(byte* filename, LibVgmstreamValid* cfg);
 
-    public static byte LibvgmstreamIsValid(byte* filename, LibVgmstreamValid* cfg)
-    {
-        EnsureLoaded();
-        return ((delegate* unmanaged[Cdecl]<byte*, LibVgmstreamValid*, byte>)_pIsValid)(filename, cfg);
-    }
+    [LibraryImport(Lib, EntryPoint = "libvgmstream_get_title")]
+    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    internal static partial int LibvgmstreamGetTitle(nint lib, LibVgmstreamTitle* cfg, byte* buf, int bufLen);
 
-    public static int LibvgmstreamGetTitle(nint lib, LibVgmstreamTitle* cfg, byte* buf, int bufLen)
-    {
-        EnsureLoaded();
-        return ((delegate* unmanaged[Cdecl]<nint, LibVgmstreamTitle*, byte*, int, int>)_pGetTitle)(lib, cfg, buf, bufLen);
-    }
+    [LibraryImport(Lib, EntryPoint = "libvgmstream_format_describe")]
+    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    internal static partial int LibvgmstreamFormatDescribe(nint lib, byte* dst, int dstSize);
 
-    public static int LibvgmstreamFormatDescribe(nint lib, byte* dst, int dstSize)
-    {
-        EnsureLoaded();
-        return ((delegate* unmanaged[Cdecl]<nint, byte*, int, int>)_pFormatDescribe)(lib, dst, dstSize);
-    }
+    [LibraryImport(Lib, EntryPoint = "libvgmstream_is_virtual_filename")]
+    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    internal static partial byte LibvgmstreamIsVirtualFilename(byte* filename);
 
-    public static byte LibvgmstreamIsVirtualFilename(byte* filename)
-    {
-        EnsureLoaded();
-        return ((delegate* unmanaged[Cdecl]<byte*, byte>)_pIsVirtualFilename)(filename);
-    }
-
-    public static nint LibvgmstreamTagsInit(nint libsf)
-    {
-        EnsureLoaded();
-        if (_pTagsInit == 0) throw new NotSupportedException("libvgmstream_tags_init is not available in this build.");
-        return ((delegate* unmanaged[Cdecl]<nint, nint>)_pTagsInit)(libsf);
-    }
-
-    public static void LibvgmstreamTagsFind(nint tags, byte* targetFilename)
-    {
-        EnsureLoaded();
-        if (_pTagsFind == 0) throw new NotSupportedException("libvgmstream_tags_find is not available in this build.");
-        ((delegate* unmanaged[Cdecl]<nint, byte*, void>)_pTagsFind)(tags, targetFilename);
-    }
-
-    public static byte LibvgmstreamTagsNextTag(nint tags)
-    {
-        EnsureLoaded();
-        if (_pTagsNextTag == 0) throw new NotSupportedException("libvgmstream_tags_next_tag is not available in this build.");
-        return ((delegate* unmanaged[Cdecl]<nint, byte>)_pTagsNextTag)(tags);
-    }
-
-    public static void LibvgmstreamTagsFree(nint tags)
-    {
-        EnsureLoaded();
-        if (_pTagsFree == 0) throw new NotSupportedException("libvgmstream_tags_free is not available in this build.");
-        ((delegate* unmanaged[Cdecl]<nint, void>)_pTagsFree)(tags);
-    }
-
-    public static nint LibstreamfileOpenFromStdio(byte* filename)
-    {
-        EnsureLoaded();
-        return ((delegate* unmanaged[Cdecl]<byte*, nint>)_pOpenFromStdio)(filename);
-    }
+    [LibraryImport(Lib, EntryPoint = "libstreamfile_open_from_stdio")]
+    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    internal static partial nint LibstreamfileOpenFromStdio(byte* filename);
 
     /// <summary>
     /// Wraps a libstreamfile_t with vgmstream's internal read cache.
     /// Recommended for custom streamfiles since vgmstream seeks heavily.
     /// </summary>
-    public static nint LibstreamfileOpenBuffered(nint extLibsf)
-    {
-        EnsureLoaded();
-        return ((delegate* unmanaged[Cdecl]<nint, nint>)_pOpenBuffered)(extLibsf);
-    }
+    [LibraryImport(Lib, EntryPoint = "libstreamfile_open_buffered")]
+    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    internal static partial nint LibstreamfileOpenBuffered(nint extLibsf);
 
-    /// <summary>
-    /// Closes a libstreamfile_t.
-    /// </summary>
-    public static void LibstreamfileClose(nint libsf)
+    [LibraryImport(Lib, EntryPoint = "libstreamfile_close")]
+    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    private static partial void LibstreamfileCloseRaw(nint libsf);
+
+    /// <summary>Closes a libstreamfile_t. Null handles are tolerated as a convenience.</summary>
+    internal static void LibstreamfileClose(nint libsf)
     {
         if (libsf == 0) return;
-        EnsureLoaded();
-        ((delegate* unmanaged[Cdecl]<nint, void>)_pStreamfileClose)(libsf);
+        LibstreamfileCloseRaw(libsf);
     }
+
+    // ── Optional entry points ──
+    //
+    // These may not exist in all libvgmstream builds. The wrappers check the
+    // feature flag up front and throw NotSupportedException instead of letting
+    // EntryPointNotFoundException bubble from the P/Invoke call site.
+
+    [LibraryImport(Lib, EntryPoint = "libvgmstream_create")]
+    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    private static partial nint LibvgmstreamCreateRaw(nint libsf, int subsong, LibVgmstreamConfig* cfg);
+
+    internal static nint LibvgmstreamCreate(nint libsf, int subsong, LibVgmstreamConfig* cfg)
+    {
+        if (!_hasCreate.Value)
+            throw new NotSupportedException("libvgmstream_create is not available in this build.");
+        return LibvgmstreamCreateRaw(libsf, subsong, cfg);
+    }
+
+    [LibraryImport(Lib, EntryPoint = "libvgmstream_set_log")]
+    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    private static partial void LibvgmstreamSetLogRaw(int level, nint callback);
+
+    internal static void LibvgmstreamSetLog(int level, nint callback)
+    {
+        if (!_hasSetLog.Value)
+            throw new NotSupportedException("libvgmstream_set_log is not available in this build.");
+        LibvgmstreamSetLogRaw(level, callback);
+    }
+
+    [LibraryImport(Lib, EntryPoint = "libvgmstream_tags_init")]
+    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    private static partial nint LibvgmstreamTagsInitRaw(nint libsf);
+
+    internal static nint LibvgmstreamTagsInit(nint libsf)
+    {
+        if (!_hasTags.Value)
+            throw new NotSupportedException("libvgmstream_tags_init is not available in this build.");
+        return LibvgmstreamTagsInitRaw(libsf);
+    }
+
+    [LibraryImport(Lib, EntryPoint = "libvgmstream_tags_find")]
+    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    private static partial void LibvgmstreamTagsFindRaw(nint tags, byte* targetFilename);
+
+    internal static void LibvgmstreamTagsFind(nint tags, byte* targetFilename)
+    {
+        if (!_hasTags.Value)
+            throw new NotSupportedException("libvgmstream_tags_find is not available in this build.");
+        LibvgmstreamTagsFindRaw(tags, targetFilename);
+    }
+
+    [LibraryImport(Lib, EntryPoint = "libvgmstream_tags_next_tag")]
+    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    private static partial byte LibvgmstreamTagsNextTagRaw(nint tags);
+
+    internal static byte LibvgmstreamTagsNextTag(nint tags)
+    {
+        if (!_hasTags.Value)
+            throw new NotSupportedException("libvgmstream_tags_next_tag is not available in this build.");
+        return LibvgmstreamTagsNextTagRaw(tags);
+    }
+
+    [LibraryImport(Lib, EntryPoint = "libvgmstream_tags_free")]
+    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    private static partial void LibvgmstreamTagsFreeRaw(nint tags);
+
+    internal static void LibvgmstreamTagsFree(nint tags)
+    {
+        if (!_hasTags.Value)
+            throw new NotSupportedException("libvgmstream_tags_free is not available in this build.");
+        LibvgmstreamTagsFreeRaw(tags);
+    }
+
+    // ── Managed helpers ──
 
     /// <summary>
     /// Helper to read a null-terminated UTF-8 string from a native pointer.
