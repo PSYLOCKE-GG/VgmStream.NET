@@ -14,6 +14,25 @@ public static unsafe class VgmStreamNative
     private static volatile bool _loaded;
     private static volatile bool _attempted;
     private static readonly object _loadLock = new();
+    private static readonly List<string> _probedPaths = [];
+    private static string? _loadError;
+
+    /// <summary>
+    /// Paths probed during the load attempt, in order. Populated after the first
+    /// access of <see cref="IsAvailable"/>. Useful for diagnosing missing-native
+    /// failures — the thrown <see cref="DllNotFoundException"/> already includes
+    /// these but calling code that only inspects <see cref="IsAvailable"/>
+    /// needs a way to see what was tried.
+    /// </summary>
+    public static IReadOnlyList<string> ProbedPaths => _probedPaths;
+
+    /// <summary>
+    /// Describes the last failure encountered during load — either a missing
+    /// native file, a load failure (missing dependency, arch mismatch), or a
+    /// missing required export. <see langword="null"/> when the native loaded
+    /// successfully or before any probe has run.
+    /// </summary>
+    public static string? LoadError => _loadError;
 
     private static nint _pGetVersion;
     private static nint _pInit;
@@ -65,29 +84,67 @@ public static unsafe class VgmStreamNative
             bool isOsx = RuntimeInformation.IsOSPlatform(OSPlatform.OSX);
             string libName = isWindows ? "libvgmstream.dll" : isOsx ? "libvgmstream.dylib" : "libvgmstream.so";
             string rid = GetRuntimeIdentifier();
-            string? assemblyDir = Path.GetDirectoryName(typeof(VgmStreamNative).Assembly.Location);
 
-            string[] searchPaths = assemblyDir != null
-                ? [
-                    Path.Combine(assemblyDir, "runtimes", rid, "native", libName),
-                    Path.Combine(assemblyDir, libName),
-                ]
-                : [libName];
+            // Probe both the assembly-containing directory and AppContext.BaseDirectory.
+            // They usually coincide, but single-file publish, AssemblyLoadContext isolation,
+            // or NuGet cache assemblies can make them differ — probing both covers every
+            // real-world layout without us having to guess which one applies.
+            string? assemblyDir = string.IsNullOrEmpty(typeof(VgmStreamNative).Assembly.Location)
+                ? null
+                : Path.GetDirectoryName(typeof(VgmStreamNative).Assembly.Location);
 
-            foreach (string path in searchPaths)
+            var roots = new List<string>(2);
+            if (!string.IsNullOrEmpty(assemblyDir))
+                roots.Add(assemblyDir);
+            if (!string.IsNullOrEmpty(AppContext.BaseDirectory)
+                && !roots.Contains(AppContext.BaseDirectory, StringComparer.OrdinalIgnoreCase))
+                roots.Add(AppContext.BaseDirectory);
+
+            foreach (string root in roots)
             {
-                if (File.Exists(path) && NativeLibrary.TryLoad(path, out _lib))
-                    break;
+                foreach (string candidate in new[]
+                {
+                    Path.Combine(root, "runtimes", rid, "native", libName),
+                    Path.Combine(root, libName),
+                })
+                {
+                    _probedPaths.Add(candidate);
+                    if (!File.Exists(candidate))
+                        continue;
+                    try
+                    {
+                        if (NativeLibrary.TryLoad(candidate, out _lib))
+                            goto loaded;
+                    }
+                    catch (Exception ex)
+                    {
+                        _loadError = $"{candidate}: {ex.GetType().Name}: {ex.Message}";
+                    }
+                }
             }
 
-            if (_lib == 0)
-                NativeLibrary.TryLoad(libName, typeof(VgmStreamNative).Assembly, null, out _lib);
+            // NuGet assembly-directed fallback: uses deps.json to resolve the native
+            // asset relative to the NuGet cache when the packaged runtime files
+            // weren't copied to the output directory.
+            _probedPaths.Add($"(assembly-directed) {libName}");
+            NativeLibrary.TryLoad(libName, typeof(VgmStreamNative).Assembly, null, out _lib);
+            if (_lib != 0) goto loaded;
 
+            // OS default search path — last resort.
+            _probedPaths.Add($"(OS default) {libName}");
+            NativeLibrary.TryLoad(libName, out _lib);
+
+            loaded:
             if (_lib == 0)
+            {
+                _loadError ??= $"{libName} not found in any probed location";
                 return;
+            }
 
             if (!TryResolveAll())
             {
+                _loadError = $"{libName} loaded but required exports are missing "
+                    + "(native build mismatch — rebuild libvgmstream with the public API enabled)";
                 NativeLibrary.Free(_lib);
                 _lib = 0;
                 return;
@@ -148,9 +205,18 @@ public static unsafe class VgmStreamNative
 
     internal static void EnsureLoaded()
     {
-        if (!IsAvailable)
-            throw new DllNotFoundException(
-                "libvgmstream library is not available. Ensure libvgmstream.dll/.so/.dylib is present in the runtimes folder.");
+        if (IsAvailable) return;
+
+        var msg = new StringBuilder("libvgmstream library is not available. ");
+        if (_loadError is not null)
+            msg.Append("Last error: ").Append(_loadError).Append(". ");
+        if (_probedPaths.Count > 0)
+        {
+            msg.AppendLine().AppendLine("Probed paths:");
+            foreach (var p in _probedPaths)
+                msg.Append("  ").AppendLine(p);
+        }
+        throw new DllNotFoundException(msg.ToString());
     }
 
     /// <summary>Mirrors libvgmstream_format_t.</summary>
