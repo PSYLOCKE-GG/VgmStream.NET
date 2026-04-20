@@ -253,6 +253,13 @@ public sealed unsafe class VgmStream : IDisposable
     public static bool IsAvailable => VgmStreamNative.IsAvailable;
 
     /// <summary>
+    /// Forces the native library to load. Throws <see cref="DllNotFoundException"/>
+    /// with the OS error detail when resolution fails. Call once at startup to
+    /// surface native-missing failures immediately instead of on first decode.
+    /// </summary>
+    public static void EnsureLoaded() => VgmStreamNative.EnsureLoaded();
+
+    /// <summary>
     /// Gets the library version as a packed uint (0xMMmmpppp).
     /// </summary>
     public static uint GetVersion() => VgmStreamNative.LibvgmstreamGetVersion();
