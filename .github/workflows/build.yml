@@ -100,27 +100,42 @@ jobs:
           mkdir -p "$out"
           cp "build/src/${{ matrix.lib }}" "$out/"
 
-          # Walk the transitive dep closure reachable from libvgmstream.so.
-          # Ubuntu's libavcodec pulls in the same codec fanout homebrew does
-          # (libx264/libx265/libvpx/libdav1d/libopus/libmp3lame/libSvtAv1Enc/
-          # libssl/libcrypto + their own deps), and each has to sit alongside
-          # libvgmstream.so for the consumer's ld.so to resolve @ORIGIN refs.
+          # Walk ONLY direct DT_NEEDED entries (via patchelf --print-needed) and
+          # recurse through our bundled libs. This mirrors dylibbundler's macOS
+          # algorithm: each visited lib contributes its direct deps to the queue.
+          # Using `ldd` instead would pull the full transitive reachable set —
+          # including libs that ffmpeg's build can link transitively (libX11,
+          # libharfbuzz, libfontconfig, libicudata, librsvg, …) but that
+          # libvgmstream's actual codec chain doesn't need. 4-5x bundle bloat.
           #
-          # IMPORTANT: patchelf --set-rpath without --force-rpath sets DT_RUNPATH,
-          # which the loader does NOT search transitively (only the direct-NEEDED
-          # lib). --force-rpath sets DT_RPATH, which IS transitive — required so
-          # libavcodec.so's own @ORIGIN search resolves libssl.so sitting next
-          # to it. This is the Linux analog of @loader_path on macOS.
+          # patchelf --set-rpath without --force-rpath sets DT_RUNPATH, which
+          # ld.so does NOT search for transitive lookups (only direct NEEDED of
+          # the initially loaded binary). --force-rpath sets DT_RPATH, which IS
+          # transitive — required so libavcodec.so's own $ORIGIN lookup resolves
+          # libssl.so sitting next to it. Linux analog of @loader_path on macOS.
           unversion() { echo "${1%.so.*}.so"; }
 
-          # Skip system libs that ld.so resolves from the standard search paths.
+          # ld.so resolves these from standard search paths on every distro;
+          # they ship with glibc and bundling them triggers ABI incompatibility.
           is_system_lib() {
             case "$1" in
               ld-linux*|libc.so.*|libm.so.*|libdl.so.*|libpthread.so.*|librt.so.*|\
-              libgcc_s.so.*|libstdc++.so.*|libresolv.so.*|libnsl.so.*|libutil.so.*)
+              libgcc_s.so.*|libstdc++.so.*|libresolv.so.*|libnsl.so.*|libutil.so.*|\
+              libz.so.*)
                 return 0 ;;
               *) return 1 ;;
             esac
+          }
+
+          # Resolve a soname -> absolute path by asking ld.so via the current
+          # library's dep map. Uses `ldd` on the specific lib but only to look
+          # up paths for the SONAMEs we've already selected via patchelf, not
+          # to enumerate new ones.
+          resolve_soname() {
+            local current="$1" soname="$2"
+            ldd "$current" 2>/dev/null | awk -v want="$soname" '
+              $1 == want && $2 == "=>" && $3 != "not" { print $3; exit }
+            '
           }
 
           pending=("${{ matrix.lib }}")
@@ -131,26 +146,21 @@ jobs:
             case " $visited " in *" $current "*) continue ;; esac
             visited="$visited $current"
 
-            # patchelf --print-needed lists each DT_NEEDED line; resolve via ldd
-            # against the library itself to get absolute paths.
-            while read -r line; do
-              # ldd output lines look like "\tlibavcodec.so.61 => /usr/lib/.../libavcodec.so.61 (0x...)"
-              soname=$(echo "$line" | awk '{print $1}')
-              resolved=$(echo "$line" | awk '{print $3}')
+            while read -r soname; do
               [ -n "$soname" ] || continue
               is_system_lib "$soname" && continue
-              [ "${resolved:-}" = "" ] && continue
-              [ "$resolved" = "not" ] && continue       # "not found"
+              base=$(unversion "$soname")
+              [ -f "$out/$base" ] && continue
+
+              resolved=$(resolve_soname "$out/$current" "$soname")
+              [ -z "$resolved" ] && continue
               [ -f "$resolved" ] || continue
 
-              base=$(unversion "$soname")
-              if [ ! -f "$out/$base" ]; then
-                cp "$resolved" "$out/$base"
-                chmod u+w "$out/$base"
-                patchelf --set-soname "$base" "$out/$base"
-                pending+=("$base")
-              fi
-            done < <(ldd "$out/$current" 2>/dev/null | sed 's/^\s*//')
+              cp "$resolved" "$out/$base"
+              chmod u+w "$out/$base"
+              patchelf --set-soname "$base" "$out/$base"
+              pending+=("$base")
+            done < <(patchelf --print-needed "$out/$current")
           done
 
           # Rewrite every bundled lib: DT_NEEDED uses unversioned soname + RPATH
