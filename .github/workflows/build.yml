@@ -143,40 +143,98 @@ jobs:
 
       - name: Collect (macOS)
         if: runner.os == 'macOS'
+        shell: bash
         run: |
+          set -euo pipefail
           BREW_PREFIX="$(brew --prefix)"
           out="runtimes/${{ matrix.rid }}/native"
           mkdir -p "$out"
-          cp build/src/${{ matrix.lib }} "$out/"
+          cp "build/src/${{ matrix.lib }}" "$out/"
 
-          # Bundle brew dylibs so consumers don't need anything installed.
-          # Resolve symlinks to get the actual versioned files.
+          # Unversion a dylib basename (libavcodec.61.dylib -> libavcodec.dylib)
+          # so cross-version @loader_path refs always resolve.
+          unversion() { echo "${1%%.[0-9]*}.dylib"; }
+
+          # Seed the bundle with the direct link-time deps from brew. The walker
+          # below handles the transitive closure; seeding explicitly here makes
+          # the happy path resilient to any linker differences between cmake runs.
           for lib in vorbis vorbisfile ogg; do
             real=$(realpath "$BREW_PREFIX/lib/lib${lib}.dylib")
             cp "$real" "$out/lib${lib}.dylib"
+            chmod u+w "$out/lib${lib}.dylib"
           done
           ffprefix="$(brew --prefix ffmpeg)"
           for lib in avcodec avformat avutil swresample; do
             real=$(realpath "$ffprefix/lib/lib${lib}.dylib")
             cp "$real" "$out/lib${lib}.dylib"
+            chmod u+w "$out/lib${lib}.dylib"
           done
 
-          # Rewrite load paths to use @loader_path (same directory)
+          # Walk the transitive brew-dylib closure. Modern Homebrew ffmpeg pulls
+          # in libx264/libx265/libvpx/libdav1d/libopus/libmp3lame/libSvtAv1Enc/
+          # libssl/libcrypto and their own deps — any of those missing causes
+          # dlopen on a consumer machine to fail with "Library not loaded:
+          # @loader_path/libXXX.dylib". Copy each referenced brew dylib in under
+          # its unversioned name and queue its deps.
+          pending=("${{ matrix.lib }}" libvorbis.dylib libvorbisfile.dylib libogg.dylib libavcodec.dylib libavformat.dylib libavutil.dylib libswresample.dylib)
+          visited=""
+          while [ "${#pending[@]}" -gt 0 ]; do
+            current="${pending[0]}"
+            pending=("${pending[@]:1}")
+            case " $visited " in *" $current "*) continue ;; esac
+            visited="$visited $current"
+
+            # Skip the `otool -L` first line (install name of the file itself).
+            while read dep; do
+              case "$dep" in
+                /opt/homebrew/*|/usr/local/*) ;;
+                *) continue ;;
+              esac
+              real=$(readlink -f "$dep" 2>/dev/null || realpath "$dep" 2>/dev/null || echo "$dep")
+              [ -f "$real" ] || continue
+
+              base=$(unversion "$(basename "$dep")")
+              if [ ! -f "$out/$base" ]; then
+                cp "$real" "$out/$base"
+                chmod u+w "$out/$base"
+                pending+=("$base")
+              fi
+            done < <(otool -L "$out/$current" 2>/dev/null | tail -n +2 | awk '{print $1}')
+          done
+
+          echo "--- bundled ---"
+          ls -1 "$out"
+          echo "--- rewriting install names ---"
           cd "$out"
           for f in *.dylib; do
-            # Fix the library's own install name
+            # Set own install name to @loader_path so the consumer's dyld resolves
+            # refs to the very file it just loaded.
             install_name_tool -id "@loader_path/$f" "$f" 2>/dev/null || true
-            # Rewrite all brew references to @loader_path
-            otool -L "$f" | awk '{print $1}' | while read dep; do
+
+            # Rewrite every brew-path dep to @loader_path/<unversioned basename>.
+            otool -L "$f" | tail -n +2 | awk '{print $1}' | while read dep; do
               case "$dep" in
                 /opt/homebrew/*|/usr/local/*)
-                  name=$(basename "$dep")
-                  # Strip version suffixes (e.g. libavcodec.61.dylib -> libavcodec.dylib)
-                  base="${name%%.[0-9]*}.dylib"
+                  base=$(unversion "$(basename "$dep")")
                   install_name_tool -change "$dep" "@loader_path/$base" "$f" 2>/dev/null || true
                   ;;
               esac
             done
+          done
+
+          # install_name_tool invalidates the adhoc linker signature; re-sign every
+          # bundled dylib so dyld accepts them on consumer machines (arm64 macOS
+          # rejects unsigned code-signed pages with SIGKILL code_signing/Invalid Page).
+          echo "--- re-signing ---"
+          for f in *.dylib; do
+            codesign --force --sign - "$f"
+          done
+          codesign --verify --verbose=2 *.dylib
+
+          echo "--- final deps ---"
+          for f in *.dylib; do
+            echo "== $f =="
+            otool -L "$f" | tail -n +2 | awk '{print "  " $1}'
           done
 
       - uses: actions/upload-artifact@v4
