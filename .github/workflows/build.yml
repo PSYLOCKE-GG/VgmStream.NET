@@ -165,8 +165,6 @@ jobs:
 
           # Rewrite every bundled lib: DT_NEEDED uses unversioned soname + RPATH
           # ($ORIGIN) set via --force-rpath so transitive lookups work.
-          echo "--- bundled ---"
-          ls -1 "$out"
           for f in "$out"/*.so; do
             while read -r versioned; do
               base=$(unversion "$versioned")
@@ -175,13 +173,6 @@ jobs:
               fi
             done < <(patchelf --print-needed "$f")
             patchelf --force-rpath --set-rpath '$ORIGIN' "$f"
-          done
-
-          echo "--- final deps ---"
-          for f in "$out"/*.so; do
-            echo "== $(basename "$f") =="
-            patchelf --print-needed "$f" | sed 's/^/  /'
-            echo "  rpath: $(patchelf --print-rpath "$f")"
           done
 
       # ── macOS ──
@@ -228,9 +219,10 @@ jobs:
             --overwrite-files
 
           # Sanity check: verify every @loader_path/* ref resolves to a bundled
-          # file and every bundled dylib passes codesign. Consumers fail-fast
-          # on missing refs (SIGKILL / Library not loaded) and bad signatures
-          # (SIGKILL / Code Signature Invalid) — cheaper to catch in CI.
+          # file, no absolute brew ref leaked through, and every bundled dylib
+          # passes codesign. Consumers fail-fast on missing refs (SIGKILL /
+          # Library not loaded) and bad signatures (SIGKILL / Code Signature
+          # Invalid) — cheaper to catch in CI.
           cd "$out"
           fail=0
           for f in *.dylib; do
@@ -248,14 +240,8 @@ jobs:
               esac
             done < <(otool -L "$f" | tail -n +2 | awk '{print $1}')
           done
-          codesign --verify --verbose=2 *.dylib
+          codesign --verify *.dylib
           [ "$fail" = 0 ] || exit 1
-
-          echo "--- final deps ---"
-          for f in *.dylib; do
-            echo "== $f =="
-            otool -L "$f" | tail -n +2 | awk '{print "  " $1}'
-          done
 
       - uses: actions/upload-artifact@v4
         with:
