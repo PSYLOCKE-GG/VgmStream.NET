@@ -17,6 +17,7 @@ jobs:
         include:
           - { runner: windows-latest, rid: win-x64,    lib: libvgmstream.dll }
           - { runner: ubuntu-22.04,   rid: linux-x64,  lib: libvgmstream.so }
+          - { runner: ubuntu-24.04-arm, rid: linux-arm64, lib: libvgmstream.so }
           - { runner: macos-15,       rid: osx-arm64,  lib: libvgmstream.dylib }
 
     steps:
